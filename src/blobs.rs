@@ -177,14 +177,12 @@ pub async fn handle_upload_blob(
             let session_id = storage.new_session(&mut conn, &name).await;
             match session_id {
                 Ok(session_id) => {
-                    debug!("session created: {session_id}");
-                    let mut headers = HeaderMap::new();
+                    let mut headers = HashMap::new();
                     headers.insert(
-                        "Location",
-                        format!("/v2/{name}/blobs/uploads/{session_id}")
-                            .parse()
-                            .unwrap(),
+                        String::from("LOCATION"),
+                        format!("/v2/{name}/blobs/uploads/{session_id}"),
                     );
+                    let headers: HeaderMap = HeaderMap::try_from(&headers).unwrap();
                     debug!("returning 202 with headers: {:?}", headers);
                     let response = (StatusCode::ACCEPTED, headers).into_response();
                     debug!("response: {:?}", response);
@@ -208,7 +206,7 @@ pub async fn handle_upload_blob(
                     }
                     let mut headers = HeaderMap::new();
                     headers.append(
-                        "Location",
+                        LOCATION,
                         format!("/v2/{}/blobs/{}", name, digest).parse().unwrap(),
                     );
                     (StatusCode::CREATED, headers, "resource created").into_response()
