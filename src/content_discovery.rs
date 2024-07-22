@@ -104,3 +104,19 @@ pub async fn get_tags_list(
             .into_response(),
     }
 }
+
+/// DELETE `/v2/<name>/manifests/<tag>`
+pub async fn delete_tag(
+    Path((name, tag)): Path<(String, String)>,
+    DbConn(mut conn): DbConn,
+) -> impl IntoResponse {
+    match sqlx::query!("DELETE FROM tags WHERE tag = ? AND repository_id = (SELECT id FROM repositories WHERE name = ?)",
+        tag,
+        name
+    )
+    .execute(&mut *conn)
+    .await {
+        Ok(_) => (StatusCode::ACCEPTED, "tag deleted successfully").into_response(),
+        Err(_) => ErrorResponse::from_code(&Code::ManifestUnknown, "tag not found").into_response(),
+    }
+}

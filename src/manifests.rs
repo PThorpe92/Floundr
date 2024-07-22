@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     codes::ErrorResponse,
     database::DbConn,
@@ -10,6 +12,7 @@ use axum::{
     Extension,
 };
 use serde::Serialize;
+use tracing::debug;
 
 #[derive(Debug, Serialize)]
 pub struct RepoList {
@@ -23,6 +26,7 @@ pub struct Repo {
 }
 
 pub async fn list_repositories(DbConn(mut conn): DbConn) -> impl IntoResponse {
+    debug!("GET /repositories \n listing repositories");
     let repositories = sqlx::query!("SELECT name, is_public FROM repositories")
         .fetch_all(&mut *conn)
         .await
@@ -41,12 +45,14 @@ pub async fn list_repositories(DbConn(mut conn): DbConn) -> impl IntoResponse {
     (StatusCode::OK, response).into_response()
 }
 
+/// PUT /v2/:name/manifests/:reference
 pub async fn push_manifest(
     Path((name, reference)): Path<(String, String)>,
-    Extension(storage): Extension<StorageDriver>,
+    Extension(storage): Extension<Arc<StorageDriver>>,
     DbConn(mut conn): DbConn,
     body: Multipart,
 ) -> impl IntoResponse {
+    debug!("POST / \n listing repositories");
     match storage
         .write_manifest(&mut conn, &name, &reference, body)
         .await

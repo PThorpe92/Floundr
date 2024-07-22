@@ -80,6 +80,5 @@ AFTER INSERT ON repositories
       INSERT INTO repository_permissions (user_id, repository_id)
       SELECT id, NEW.id FROM users;
   END;
-
-INSERT INTO users (id, email, password) VALUES (1, 'preston@unlockedlabs.org', 'ChangeMe!');
 INSERT INTO repositories (id, name, is_public) VALUES (1, 'public', 1);
+INSERT INTO users (id, email, password) VALUES (1, 'preston@unlockedlabs.org', 'ChangeMe!');

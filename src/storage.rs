@@ -8,11 +8,12 @@ use sqlx::{query, SqliteConnection};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct StorageDriver {
-    base_path: PathBuf,
+    pub base_path: PathBuf,
 }
 
 pub fn calculate_digest(data: &[u8]) -> String {
@@ -54,7 +55,7 @@ impl StorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         session_id: &str,
-        mut data: Multipart,
+        data: &mut Multipart,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let path = self.base_path.join(name).join("blobs").join(session_id);
         let mut file = File::create(&path)?;
@@ -146,12 +147,22 @@ impl StorageDriver {
         name: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let session_id = Uuid::new_v4().to_string();
+        info!("creating new session with id: {}", session_id);
         query!("INSERT INTO uploads (repository_id, uuid) VALUES ((SELECT id FROM repositories WHERE name = ?), ?)", name, session_id)
             .execute(conn)
             .await?;
         let new_dir = self.base_path.join(name).join(&session_id);
-        std::fs::create_dir(new_dir)?;
-        Ok(session_id)
+        debug!("creating new directory: {:?}", new_dir);
+        match std::fs::create_dir_all(&new_dir) {
+            Ok(_) => {
+                debug!("Created new session directory: {:?}", session_id);
+                Ok(session_id)
+            }
+            Err(e) => {
+                error!("Error creating directory: {:?}", e);
+                Err(e.into())
+            }
+        }
     }
 
     pub async fn mount_blob(
@@ -251,14 +262,23 @@ impl StorageDriver {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // reference can be either a tag OR a digest
         // check if its a tag
-        let row = query!("SELECT COUNT(*) as count FROM tags JOIN repositories ON tags.repository_id = repositories.id WHERE tag = ? AND repositories.name = ?", reference, name)
+        let row = if let Ok(record) = query!("SELECT b.digest FROM tags JOIN repositories r ON tags.repository_id = r.id JOIN blobs b on b.id = tags.blob_id WHERE tag = ? AND r.name = ?", reference, name)
             .fetch_one(&mut *pool)
-            .await?.count > 0;
-        let row = query!("SELECT file_path, manifests.id FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", digest, name)
-        .fetch_one(&mut *pool)
-        .await?;
-        std::fs::remove_file(row.file_path)?;
-        query!("DELETE FROM manifests WHERE id = ?", row.id)
+            .await {
+            // now we have the digest, delete the manifest
+            let row = query!("SELECT file_path, manifests.id as m_id FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", record.digest, name)
+                .fetch_one(&mut *pool)
+                .await?;
+            (row.file_path, row.m_id)
+        } else {
+            // reference is a digest
+            let row = query!("SELECT file_path, manifests.id as m_id FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", reference, name)
+            .fetch_one(&mut *pool)
+            .await?;
+            (row.file_path, row.m_id)
+        };
+        std::fs::remove_file(row.0)?;
+        query!("DELETE FROM manifests WHERE id = ?", row.1)
             .execute(pool)
             .await?;
         Ok(())
