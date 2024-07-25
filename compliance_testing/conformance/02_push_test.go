@@ -3,7 +3,6 @@ package conformance
 import (
 	"fmt"
 	"net/http"
-
 	"strconv"
 
 	"github.com/bloodorangeio/reggie"
@@ -13,7 +12,6 @@ import (
 
 var test02Push = func() {
 	g.Context(titlePush, func() {
-
 		var lastResponse, prevResponse *reggie.Response
 		var emptyLayerManifestRef string
 

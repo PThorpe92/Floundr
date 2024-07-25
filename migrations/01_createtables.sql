@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS repositories (
 CREATE TABLE IF NOT EXISTS blobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repository_id INTEGER NOT NULL,
-    digest TEXT NOT NULL UNIQUE,
+    digest TEXT NOT NULL,
     file_path TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (repository_id) REFERENCES repositories(id)

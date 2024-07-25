@@ -1,13 +1,17 @@
-use axum::async_trait;
+use axum::body::BodyDataStream;
 use axum::extract::{FromRef, FromRequestParts, Multipart};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
-use futures::StreamExt;
+use axum::{async_trait, BoxError};
+use bytes::Bytes;
+use futures::{Stream, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use sqlx::{query, SqliteConnection};
-use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{self};
 use std::path::{Path, PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{fs::File, io::BufWriter};
+use tokio_util::io::StreamReader;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -30,6 +34,19 @@ pub fn validate_digest(data: &[u8], digest: &str) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+fn path_is_valid(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let mut components = path.components().peekable();
+
+    if let Some(first) = components.peek() {
+        if !matches!(first, std::path::Component::Normal(_)) {
+            return false;
+        }
+    }
+
+    components.count() == 1
+}
+
 #[async_trait]
 impl<S> FromRequestParts<S> for StorageDriver
 where
@@ -50,29 +67,56 @@ impl StorageDriver {
         }
     }
 
+    pub async fn stream_to_file<S, E>(
+        &self,
+        path: &str,
+        session_id: &str,
+        stream: S,
+    ) -> Result<PathBuf, String>
+    where
+        S: Stream<Item = Result<Bytes, E>>,
+        E: Into<BoxError>,
+    {
+        if !path_is_valid(path) {
+            return Err("Invalid path".to_string());
+        }
+        async {
+            let body_with_io_error =
+                stream.map_err(|err| io::Error::new(io::ErrorKind::Other, err));
+            let body_reader = StreamReader::new(body_with_io_error);
+            futures::pin_mut!(body_reader);
+            if !self.base_path.join(path).exists() {
+                tokio::fs::create_dir_all(self.base_path.join(path)).await?;
+            }
+            let path = self.base_path.join(path).join(session_id);
+            debug!("streaming to file: {:?}", path);
+            let mut file = BufWriter::new(File::create(path.clone()).await?);
+
+            tokio::io::copy(&mut body_reader, &mut file).await?;
+            debug!("finished streaming to file completed: {:?}", path);
+            Ok::<_, io::Error>(path)
+        }
+        .await
+        .map_err(|err| err.to_string())
+    }
+
     pub async fn write_blob(
         &self,
         pool: &mut SqliteConnection,
         name: &str,
         session_id: &str,
-        data: &mut Multipart,
+        data: BodyDataStream,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let path = self.base_path.join(name).join("blobs").join(session_id);
-        let mut file = File::create(&path)?;
-        while let Some(mut field) = data.next_field().await? {
-            while let Some(chunk) = field.next().await {
-                file.write_all(&chunk?)?;
-            }
-        }
-        let digest = calculate_digest(&std::fs::read(&path)?);
+        let path = self.stream_to_file("blobs", session_id, data).await?;
+        let digest = calculate_digest(&tokio::fs::read(&path).await?);
         let file_path = self
             .base_path
             .join(name)
-            .join("blobs")
+            .join(session_id)
             .join(&digest)
             .to_string_lossy()
             .to_string();
-        std::fs::rename(path, &file_path)?;
+        tokio::fs::rename(path, &file_path).await?;
         query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
         .execute(pool)
         .await?;
@@ -84,15 +128,9 @@ impl StorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         digest: &str,
-        mut data: Multipart,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.base_path.join(name).join("blobs").join(digest);
-        let mut file = File::create(&path)?;
-        while let Some(mut field) = data.next_field().await? {
-            while let Some(chunk) = field.next().await {
-                file.write_all(&chunk?)?;
-            }
-        }
+        data: BodyDataStream,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let path = self.stream_to_file("blobs", digest, data).await?;
         validate_digest(&std::fs::read(&path)?, digest)?;
         let file_path = self
             .base_path
@@ -104,8 +142,9 @@ impl StorageDriver {
         query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
         .execute(pool)
         .await?;
-        Ok(())
+        Ok(digest.to_owned())
     }
+
     pub async fn read_blob(
         &self,
         pool: &mut SqliteConnection,
@@ -117,11 +156,11 @@ impl StorageDriver {
             .fetch_one(pool)
             .await?;
 
-        let mut file = File::open(row.file_path)?;
+        let mut file = File::open(row.file_path).await?;
         let mut data = Vec::new();
         validate_digest(&data, digest)?;
 
-        file.read_to_end(&mut data)?;
+        file.read_to_end(&mut data).await?;
         Ok(data)
     }
 
@@ -135,9 +174,9 @@ impl StorageDriver {
             .fetch_one(conn)
             .await?;
 
-        let mut file = File::open(row.file_path)?;
+        let mut file = File::open(row.file_path).await?;
         let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
+        file.read_to_end(&mut data).await?;
         Ok(data)
     }
 
@@ -148,21 +187,28 @@ impl StorageDriver {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let session_id = Uuid::new_v4().to_string();
         info!("creating new session with id: {}", session_id);
+        let new_dir = self.base_path.join(name).join(&session_id);
+        debug!("creating new directory: {:?}", new_dir);
+        if let Err(err) = std::fs::create_dir_all(&new_dir) {
+            error!("Error creating directory: {:?}", err);
+            return Err(err.into());
+        }
+        if query!(
+            "SELECT COUNT(*) as num FROM repositories WHERE name = ?",
+            name
+        )
+        .fetch_one(&mut *conn)
+        .await?
+        .num == 0
+        {
+            query!("INSERT INTO repositories (name) VALUES (?)", name)
+                .execute(&mut *conn)
+                .await?;
+        }
         query!("INSERT INTO uploads (repository_id, uuid) VALUES ((SELECT id FROM repositories WHERE name = ?), ?)", name, session_id)
             .execute(conn)
             .await?;
-        let new_dir = self.base_path.join(name).join(&session_id);
-        debug!("creating new directory: {:?}", new_dir);
-        match std::fs::create_dir_all(&new_dir) {
-            Ok(_) => {
-                debug!("Created new session directory: {:?}", session_id);
-                Ok(session_id)
-            }
-            Err(e) => {
-                error!("Error creating directory: {:?}", e);
-                Err(e.into())
-            }
-        }
+        Ok(session_id)
     }
 
     pub async fn mount_blob(
@@ -218,10 +264,10 @@ impl StorageDriver {
         mut data: Multipart,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let path = self.base_path.join(name).join(reference);
-        let mut file = File::create(&path)?;
+        let mut file = File::create(&path).await?;
         while let Some(mut field) = data.next_field().await? {
             while let Some(chunk) = field.next().await {
-                file.write_all(&chunk?)?;
+                file.write_all(&chunk?).await?;
             }
         }
         let digest = calculate_digest(&std::fs::read(&path)?);

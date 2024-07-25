@@ -4,14 +4,14 @@ use crate::{
     storage::StorageDriver,
 };
 use axum::{
-    extract::{Multipart, Path, Query},
+    extract::{Path, Query, Request},
     http::{header::LOCATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Extension,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, error};
 
 /// GET /v2/:name/blobs/:digest
 /// to pull a blob from the registry
@@ -20,6 +20,7 @@ pub async fn get_blob(
     DbConn(mut conn): DbConn,
     Extension(blob_storage): Extension<Arc<StorageDriver>>,
 ) -> impl IntoResponse {
+    debug!("GET /v2/{}/blobs/{}", name, digest);
     match blob_storage.read_blob(&mut conn, &name, &digest).await {
         Ok(data) => {
             let mut headers = HeaderMap::new();
@@ -38,6 +39,7 @@ pub async fn check_blob(
     Path((name, digest)): Path<(String, String)>,
     DbConn(mut conn): DbConn,
 ) -> impl IntoResponse {
+    debug!("HEAD /v2/{}/blobs/{}", name, digest);
     let exists = sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -58,6 +60,7 @@ pub async fn delete_blob(
     DbConn(mut conn): DbConn,
     storage: Extension<Arc<StorageDriver>>,
 ) -> impl IntoResponse {
+    debug!("DELETE /v2/{}/blobs/{}", name, digest);
     if sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -84,6 +87,8 @@ pub async fn delete_blob(
 #[derive(serde::Deserialize, Debug)]
 pub struct QueryParams {
     pub digest: Option<String>,
+    pub mount: Option<String>,
+    pub from: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -108,45 +113,39 @@ pub async fn upload_blob(
     Extension(blob_storage): Extension<Arc<StorageDriver>>,
     DbConn(mut conn): DbConn,
     headers: HeaderMap,
-    body: Option<Multipart>,
+    request: Request,
 ) -> impl IntoResponse {
     debug!("PUT /v2/{}/blobs/uploads/{}", path.name, path.session_id);
     debug!("headers: {:?}", headers);
-    let digest = match digest.digest {
-        Some(d) => d,
-        None => {
-            let code = crate::codes::Code::DigestInvalid;
-            return ErrorResponse::from_code(&code, "digest missing").into_response();
-        }
-    };
-    if !headers.contains_key("Content-Length") {
-        let code = crate::codes::Code::BlobUploadUnknown;
-        return ErrorResponse::from_code(&code, "missing content length").into_response();
-    }
-    if body.is_none() {
-        let code = crate::codes::Code::BlobUploadUnknown;
-        return ErrorResponse::from_code(&code, "missing content").into_response();
-    }
     match blob_storage
-        .write_blob(&mut conn, &path.name, &path.session_id, &mut body.unwrap())
+        .write_blob(
+            &mut conn,
+            &path.name,
+            &path.session_id,
+            request.into_body().into_data_stream(),
+        )
         .await
     {
         Ok(result_digest) => {
-            if !result_digest.eq(&digest) {
-                let code = crate::codes::Code::DigestInvalid;
-                return ErrorResponse::from_code(&code, "digest did not match content")
-                    .into_response();
+            if let Some(sha) = digest.digest {
+                if !result_digest.eq(&sha.split(':').nth(1).unwrap()) {
+                    error!("{} did not match {}", result_digest, sha);
+                    let code = crate::codes::Code::DigestInvalid;
+                    return ErrorResponse::from_code(&code, "digest did not match content")
+                        .into_response();
+                }
             }
             let mut headers = HeaderMap::new();
             headers.append(
                 "Location",
-                format!("/v2/{}/blobs/{}", path.name, digest)
+                format!("/v2/{}/blobs/{}", path.name, result_digest)
                     .parse()
                     .unwrap(), // TODO: handle error better
             );
             (StatusCode::CREATED, headers, "resource created").into_response()
         }
-        Err(_) => {
+        Err(err) => {
+            error!("error uploading blob: {:?}", err);
             let code = crate::codes::Code::BlobUploadUnknown;
             ErrorResponse::from_code(&code, "unable to upload blob").into_response()
         }
@@ -159,104 +158,102 @@ pub struct BlobPath {
 /// POST /v2/:name/blobs/uploads/?digest=<digest>
 /// if no digest is provided, create a new session and respond with a 202 Accepted
 /// spec 289-322
+///
+/// QUERY /v2/:name/blobs/uploads/?mount=<digest>&from=<other_name>
+/// mount a blob from another repository
+/// returns a 201 Created with Location header
+/// that contains the digest of the mounted blob
+/// <location>?digest=<digest>
+/// spec: 436-460
 pub async fn handle_upload_blob(
     Path(name): Path<BlobPath>,
     Query(digest): Query<QueryParams>,
     Extension(storage): Extension<Arc<StorageDriver>>,
     DbConn(mut conn): DbConn,
     headers: HeaderMap,
-    mut body: Option<Multipart>,
+    request: Request,
 ) -> impl IntoResponse {
     let name = name.name;
     debug!("Handling blob upload for {name}");
     debug!("query params: {:?}", digest);
     debug!("headers: {:?}", headers);
-    match digest.digest {
-        None => {
-            debug!("no digest, creating new uuid/session");
-            let session_id = storage.new_session(&mut conn, &name).await;
-            match session_id {
-                Ok(session_id) => {
-                    let mut headers = HashMap::new();
+    if let Some(sha) = digest.digest {
+        if let Some(mount) = digest.mount {
+            match storage
+                .mount_blob(&mut conn, &name, &mount, digest.from.as_deref())
+                .await
+            {
+                Ok(_) => {
+                    let mut headers = HeaderMap::new();
                     headers.insert(
-                        String::from("LOCATION"),
-                        format!("/v2/{name}/blobs/uploads/{session_id}"),
+                        "Location",
+                        format!("/v2/{}/blobs/{}", name, mount).parse().unwrap(),
                     );
-                    let headers: HeaderMap = HeaderMap::try_from(&headers).unwrap();
-                    debug!("returning 202 with headers: {:?}", headers);
-                    let response = (StatusCode::ACCEPTED, headers).into_response();
-                    debug!("response: {:?}", response);
-                    response
+                    headers.insert("Docker-Content-Digest", mount.parse().unwrap());
+
+                    (StatusCode::CREATED, headers).into_response()
                 }
-                Err(_) => {
-                    let code = crate::codes::Code::NameUnknown;
-                    ErrorResponse::from_code(&code, "respository name not found").into_response()
+                Err(err) => {
+                    error!("error uploading blob: {:?}", err);
+                    let code = crate::codes::Code::BlobUploadUnknown;
+                    ErrorResponse::from_code(&code, "unable to mount blob").into_response()
                 }
             }
-        }
-        Some(digest) => {
+        } else {
             debug!("digest provided, uploading blob");
             match storage
-                .write_blob(&mut conn, &name, &digest, body.as_mut().unwrap())
+                .write_blob_without_session_id(
+                    &mut conn,
+                    &name,
+                    &sha,
+                    request.into_body().into_data_stream(),
+                )
                 .await
             {
                 Ok(result_digest) => {
-                    if result_digest != digest {
-                        return (StatusCode::BAD_REQUEST, "Digest mismatch").into_response();
+                    if !result_digest.eq(&sha) {
+                        let code = crate::codes::Code::DigestInvalid;
+                        return ErrorResponse::from_code(&code, "digest did not match content")
+                            .into_response();
                     }
                     let mut headers = HeaderMap::new();
                     headers.append(
                         LOCATION,
-                        format!("/v2/{}/blobs/{}", name, digest).parse().unwrap(),
+                        format!("/v2/{}/blobs/{}", name, sha).parse().unwrap(),
                     );
                     (StatusCode::CREATED, headers, "resource created").into_response()
                 }
-                Err(_) => ErrorResponse::from_code(
-                    &crate::codes::Code::BlobUploadUnknown,
-                    String::from("unable to upload blob"),
-                )
-                .into_response(),
+                Err(err) => {
+                    error!("error uploading blob: {:?}", err);
+                    ErrorResponse::from_code(
+                        &crate::codes::Code::BlobUploadUnknown,
+                        String::from("unable to upload blob"),
+                    )
+                    .into_response()
+                }
             }
         }
-    }
-}
-
-/// POST /v2/:name/blobs/uploads/?mount=<digest>&from=<other_name>
-/// mount a blob from another repository
-/// returns a 201 Created with Location header
-/// that contains the digest of the mounted blob
-/// <location>?digest=<digest>
-/// spec: 436-460
-pub async fn mount_blob(
-    Path(name): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-    Extension(blob_storage): Extension<Arc<StorageDriver>>,
-    DbConn(mut conn): DbConn,
-) -> impl IntoResponse {
-    let digest = match params.get("mount") {
-        Some(d) => d,
-        None => {
-            return (StatusCode::BAD_REQUEST, "Missing 'mount' parameter").into_response();
-        }
-    };
-    let from = params.get("from").map(|s| s.as_str());
-    match blob_storage
-        .mount_blob(&mut conn, &name, digest, from)
-        .await
-    {
-        Ok(_) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "Location",
-                format!("/v2/{}/blobs/{}", name, digest).parse().unwrap(),
-            );
-            headers.insert("Docker-Content-Digest", digest.parse().unwrap());
-
-            (StatusCode::CREATED, headers).into_response()
-        }
-        Err(_) => {
-            let code = crate::codes::Code::BlobUploadUnknown;
-            ErrorResponse::from_code(&code, "unable to mount blob").into_response()
+    } else {
+        debug!("no digest, creating new uuid/session");
+        let session_id = storage.new_session(&mut conn, &name).await;
+        match session_id {
+            Ok(session_id) => {
+                let mut headers = HashMap::new();
+                headers.insert(
+                    String::from("LOCATION"),
+                    format!("/v2/{name}/blobs/uploads/{session_id}"),
+                );
+                let headers: HeaderMap = HeaderMap::try_from(&headers).unwrap();
+                debug!("returning 202 with headers: {:?}", headers);
+                let response = (StatusCode::ACCEPTED, headers).into_response();
+                debug!("response: {:?}", response);
+                response
+            }
+            Err(err) => {
+                error!("error uploading blob: {:?}", err);
+                let code = crate::codes::Code::NameUnknown;
+                ErrorResponse::from_code(&code, "respository name not found").into_response()
+            }
         }
     }
 }

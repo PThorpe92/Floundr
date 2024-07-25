@@ -1,6 +1,6 @@
 use axum::{
     http::StatusCode,
-    routing::{delete, get, head, post, put},
+    routing::{delete, get, head, patch, post, put},
     Extension, Router,
 };
 use clap::Parser;
@@ -9,7 +9,7 @@ use oci_rs::{
     blobs::{check_blob, delete_blob, get_blob, handle_upload_blob, upload_blob},
     content_discovery::get_tags_list,
     database::{create_new_repo, initdb, migrate_fresh},
-    manifests::{get_manifest, list_repositories},
+    manifests::{delete_manifest, get_manifest, list_repositories, push_manifest},
     storage,
 };
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
@@ -23,7 +23,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(version = "0.0.1")]
 #[command(about = "OCI compliant container registry server", long_about = None)]
 struct App {
-    #[arg(long, short = 'p', default_value = "8080")]
+    #[arg(long, short = 'p', default_value = "80")]
     port: Option<usize>,
     #[arg(long)]
     storage_path: Option<PathBuf>,
@@ -65,7 +65,7 @@ async fn main() {
     handle_args(&args, &pool, &storage).await;
 
     let host = std::env::var("HOST").unwrap_or("127.0.0.1".to_string());
-    let port = args.port.unwrap_or(8080);
+    let port = args.port.unwrap_or(80);
     let addr = SocketAddr::from_str(&format!("{host}:{port}")).unwrap_or_else(|_| {
         eprintln!("Invalid address: {host}:{port}");
         std::process::exit(1);
@@ -94,9 +94,12 @@ async fn main() {
         .route("/v2/:name/blobs/:digest", head(check_blob))
         .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
         .route("/v2/:name/blobs/uploads/:session_id", put(upload_blob))
+        .route("/v2/:name/blobs/uploads/:session_id", patch(upload_blob))
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
         .route("/v2/:name/manifests/:reference", get(get_manifest))
+        .route("/v2/:name/manifests/:reference", put(push_manifest))
+        .route("/v2/:name/manifests/:reference", delete(delete_manifest))
         .layer(Extension(Arc::new(storage)))
         .with_state(pool);
 

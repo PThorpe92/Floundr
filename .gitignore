@@ -1,2 +1,3 @@
 /target
+.env
 /oci_rs.db

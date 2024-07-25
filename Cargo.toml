@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.38.0", features = ["full"] }
+tokio = { version = "1.39.0", features = ["full"] }
 serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0.120"
 http-body-util = "0.1.2"
@@ -21,7 +21,7 @@ axum = { version = "0.7.5", features = [
   'http2',
 ] }
 futures = "0.3.30"
-sqlx = { version = "0.7.4", features = [
+sqlx = { version = "0.8.0", features = [
   'sqlite',
   'macros',
   'runtime-tokio-rustls',
@@ -37,3 +37,4 @@ regex = "1.10.5"
 tower = "0.4.13"
 tower-http = { version = "0.5.2", features = ["trace"] }
 http = "1.1.0"
+tokio-util = "0.7.11"
