@@ -1,8 +1,8 @@
 OCI_NAMESPACE="test_repo" \
   OCI_ROOT_URL="http://127.0.0.1" \
   OCI_CROSSMOUNT_NAMESPACE="public" \
-  OCI_USERNAME="preston@unlockedlabs.org" \
-  OCI_PASSWORD="ChangeMe!" \
+  OCI_USERNAME="admin" \
+  OCI_PASSWORD="admin" \
   OCI_TEST_PULL=1 \
   OCI_TEST_PUSH=1 \
   OCI_TEST_CONTENT_DISCOVERY=1 \

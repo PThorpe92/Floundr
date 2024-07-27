@@ -1,7 +1,7 @@
 use crate::{
     codes::{Code, ErrorResponse},
     database::DbConn,
-    storage::StorageDriver,
+    storage_driver::Backend,
 };
 use axum::{
     extract::{Path, Query, Request},
@@ -18,7 +18,7 @@ use tracing::{debug, error};
 pub async fn get_blob(
     Path((name, digest)): Path<(String, String)>,
     DbConn(mut conn): DbConn,
-    Extension(blob_storage): Extension<Arc<StorageDriver>>,
+    Extension(blob_storage): Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
     debug!("GET /v2/{}/blobs/{}", name, digest);
     match blob_storage.read_blob(&mut conn, &name, &digest).await {
@@ -58,7 +58,7 @@ pub async fn check_blob(
 pub async fn delete_blob(
     Path((name, digest)): Path<(String, String)>,
     DbConn(mut conn): DbConn,
-    storage: Extension<Arc<StorageDriver>>,
+    storage: Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
     debug!("DELETE /v2/{}/blobs/{}", name, digest);
     if sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
@@ -91,7 +91,7 @@ pub struct QueryParams {
     pub from: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 pub struct BlobUpload {
     pub name: String,
     pub session_id: String,
@@ -110,25 +110,24 @@ pub struct BlobUpload {
 pub async fn upload_blob(
     Path(path): Path<BlobUpload>,
     Query(digest): Query<QueryParams>,
-    Extension(blob_storage): Extension<Arc<StorageDriver>>,
+    Extension(blob_storage): Extension<Arc<Backend>>,
     DbConn(mut conn): DbConn,
-    headers: HeaderMap,
     request: Request,
 ) -> impl IntoResponse {
     debug!("PUT /v2/{}/blobs/uploads/{}", path.name, path.session_id);
-    debug!("headers: {:?}", headers);
     match blob_storage
         .write_blob(
-            &mut conn,
             &path.name,
             &path.session_id,
+            &mut conn,
             request.into_body().into_data_stream(),
         )
         .await
     {
         Ok(result_digest) => {
             if let Some(sha) = digest.digest {
-                if !result_digest.eq(&sha.split(':').nth(1).unwrap()) {
+                let result_digest = format!("sha256:{}", result_digest);
+                if !result_digest.eq(&sha) {
                     error!("{} did not match {}", result_digest, sha);
                     let code = crate::codes::Code::DigestInvalid;
                     return ErrorResponse::from_code(&code, "digest did not match content")
@@ -168,7 +167,7 @@ pub struct BlobPath {
 pub async fn handle_upload_blob(
     Path(name): Path<BlobPath>,
     Query(digest): Query<QueryParams>,
-    Extension(storage): Extension<Arc<StorageDriver>>,
+    Extension(storage): Extension<Arc<Backend>>,
     DbConn(mut conn): DbConn,
     headers: HeaderMap,
     request: Request,

@@ -1,0 +1,20 @@
+[package]
+name = "tui_client"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+
+[dependencies]
+ratatui = { version = "0.27.0", features = ["macros", "all-widgets", "serde"] }
+ratatui-widgets = "0.1.9"
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.120"
+serde_yaml = "0.9.34"
+tokio = { version = "1.13.1", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
+tui-input = "0.9.0"
+dirs = "5.0.1"
+lazy_static = "1.5.0"
+dashmap = "6.0.1"

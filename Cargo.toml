@@ -3,6 +3,9 @@ name = "oci_rs"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["."]
+
 [dependencies]
 tokio = { version = "1.39.0", features = ["full"] }
 serde = { version = "1.0.204", features = ["derive"] }

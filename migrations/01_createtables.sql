@@ -32,8 +32,21 @@ CREATE TABLE IF NOT EXISTS manifests (
     digest TEXT NOT NULL UNIQUE,
     media_type TEXT NOT NULL,
     file_path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (repository_id) REFERENCES repositories(id)
+);
+
+CREATE TABLE IF NOT EXISTS manifest_layers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repository_id INTEGER NOT NULL,
+    manifest_id INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    media_type TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id)
 );
 
 CREATE TABLE IF NOT EXISTS uploads (

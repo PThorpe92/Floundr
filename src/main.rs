@@ -8,9 +8,11 @@ use http::Request;
 use oci_rs::{
     blobs::{check_blob, delete_blob, get_blob, handle_upload_blob, upload_blob},
     content_discovery::get_tags_list,
-    database::{create_new_repo, initdb, migrate_fresh},
-    manifests::{delete_manifest, get_manifest, list_repositories, push_manifest},
-    storage,
+    database::{initdb, migrate_fresh},
+    manifests::{
+        create_repository, delete_manifest, get_manifest, list_repositories, push_manifest,
+    },
+    storage_driver::{Backend, DriverType},
 };
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 use tower::ServiceBuilder;
@@ -23,7 +25,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(version = "0.0.1")]
 #[command(about = "OCI compliant container registry server", long_about = None)]
 struct App {
-    #[arg(long, short = 'p', default_value = "80")]
+    #[arg(long, short = 'p', default_value = "8080")]
     port: Option<usize>,
     #[arg(long)]
     storage_path: Option<PathBuf>,
@@ -39,9 +41,11 @@ struct App {
         long,
         requires = "new_repo",
         help = "whether the new repository is public",
-        default_value = "false"
+        default_missing_value = "true"
     )]
-    is_public: Option<bool>,
+    public: Option<bool>,
+    #[arg(long, default_value = "local", value_enum)]
+    driver: DriverType,
 }
 
 #[tokio::main]
@@ -55,17 +59,44 @@ async fn main() {
     let _ = dotenvy::dotenv().ok();
     let args = App::parse();
     let home = args.container_home_dir.as_ref().cloned().map_or_else(
-        || std::env::var("OCI_HOME").unwrap_or("".to_string()),
+        || {
+            std::env::var("HARBOR_HOME").unwrap_or(
+                dirs::data_local_dir()
+                    .expect("unable to get XDG_LOCAL_DIR")
+                    .join("harbor")
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        },
         |path| path.to_string_lossy().to_string(),
     );
-    let storage =
-        storage::StorageDriver::new(args.storage_path.as_ref().unwrap_or(&PathBuf::from(home)));
-    info!("storage path home: {:?}", storage.base_path);
-    let pool = initdb(&args.db_path.clone().unwrap_or("./oci_rs.db".to_string())).await;
-    handle_args(&args, &pool, &storage).await;
+
+    let storage = Backend::new(
+        DriverType::Local,
+        args.storage_path
+            .unwrap_or_else(|| std::path::Path::new(&home).into()),
+    );
+    info!("storage path home: {:?}", storage.base_path());
+    let pool = initdb(
+        &std::path::Path::new(&home)
+            .join("harbor.db")
+            .to_string_lossy(),
+    )
+    .await;
+    let mut conn = pool.acquire().await.expect("unable to acquire connection");
+    if args.migrate_fresh {
+        migrate_fresh(&mut conn)
+            .await
+            .expect("unable to migrate database");
+    }
+    if let Some(name) = &args.new_repo {
+        let _ = storage
+            .create_repository(&mut conn, name, args.public.unwrap_or(true))
+            .await;
+    }
 
     let host = std::env::var("HOST").unwrap_or("127.0.0.1".to_string());
-    let port = args.port.unwrap_or(80);
+    let port = args.port.unwrap_or(8080);
     let addr = SocketAddr::from_str(&format!("{host}:{port}")).unwrap_or_else(|_| {
         eprintln!("Invalid address: {host}:{port}");
         std::process::exit(1);
@@ -90,6 +121,7 @@ async fn main() {
             )),
         )
         .route("/repositories", get(list_repositories))
+        .route("/repositories/:name/:public", post(create_repository))
         .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
         .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
@@ -106,17 +138,6 @@ async fn main() {
     axum::serve(listener, app.into_make_service())
         .await
         .expect("unable to start server");
-}
-
-async fn handle_args(args: &App, pool: &sqlx::SqlitePool, storage: &storage::StorageDriver) {
-    if args.migrate_fresh {
-        migrate_fresh(pool)
-            .await
-            .expect("unable to migrate database");
-    }
-    if let Some(name) = &args.new_repo {
-        let _ = create_new_repo(name, args.is_public.unwrap_or(false), pool, storage).await;
-    }
 }
 
 /// GET /v2/

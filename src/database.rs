@@ -3,10 +3,8 @@ use axum::{
     extract::{FromRef, FromRequestParts},
     http::{request::Parts, StatusCode},
 };
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
-use tracing::debug;
-
-use crate::storage;
+use sqlx::{query, sqlite::SqlitePoolOptions, Acquire, Executor, SqliteConnection, SqlitePool};
+use tracing::info;
 
 pub static TABLES: [&str; 8] = [
     "repositories",
@@ -22,11 +20,20 @@ pub static TABLES: [&str; 8] = [
 pub struct DbConn(pub sqlx::pool::PoolConnection<sqlx::Sqlite>);
 
 pub async fn initdb(path: &str) -> sqlx::Pool<sqlx::Sqlite> {
-    SqlitePoolOptions::new()
+    info!("connecting to sqlite db at: {}", path);
+    if !std::path::Path::new(&path).exists() {
+        tokio::fs::File::create_new(&path)
+            .await
+            .expect("unable to create sqlite db");
+    }
+    let pool = SqlitePoolOptions::new()
         .max_connections(4)
         .connect(path)
         .await
-        .expect("unable to connect to sqlite db pool")
+        .expect("unable to connect to sqlite db pool");
+    let mut conn = pool.acquire().await.expect("unable to acquire connection");
+    migrate(&mut conn).await.expect("unable to migrate db");
+    pool
 }
 
 impl std::ops::Deref for DbConn {
@@ -41,6 +48,7 @@ impl std::ops::DerefMut for DbConn {
         &mut self.0
     }
 }
+
 #[async_trait]
 impl<S> FromRequestParts<S> for DbConn
 where
@@ -70,36 +78,14 @@ where
     (StatusCode::NOT_FOUND, err.to_string())
 }
 
-pub async fn migrate_fresh(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+pub async fn migrate_fresh(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     drop_tables(pool).await?;
-    create_tables(pool).await?;
+    migrate(pool).await?;
     Ok(())
 }
 
-pub async fn create_new_repo(
-    name: &str,
-    is_pub: bool,
-    conn: &SqlitePool,
-    storage: &storage::StorageDriver,
-) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "INSERT INTO repositories (name, is_public) VALUES (?, ?)",
-        name,
-        is_pub
-    )
-    .execute(conn)
-    .await?;
-    debug!("Created new repository: {}", name);
-    let path = storage.base_path.join(name);
-    debug!("creating path: {:?}", path);
-    match std::fs::create_dir_all(&path) {
-        Ok(_) => debug!("Created new repository directory: {:?}", name),
-        Err(e) => debug!("Error creating new repository directory: {:?}", e),
-    }
-    Ok(())
-}
-
-pub async fn create_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+pub async fn migrate(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let conn = pool.acquire().await?;
     sqlx::query(
         r"
 CREATE TABLE IF NOT EXISTS repositories (
@@ -169,19 +155,27 @@ AFTER INSERT ON repositories
   BEGIN
       INSERT INTO repository_permissions (user_id, repository_id)
       SELECT id, NEW.id FROM users;
-  END;
-INSERT INTO repositories (id, name, is_public) VALUES (1, 'public', 1);
-INSERT INTO users (id, email, password) VALUES (1, 'preston@unlockedlabs.org', 'ChangeMe!');",
+  END;",
     )
-    .execute(pool)
+    .execute(conn)
     .await?;
+    let conn = pool.acquire().await?;
+    if query!("SELECT id from users WHERE id = 1")
+        .fetch_one(conn)
+        .await
+        .is_err()
+    {
+        query!("INSERT INTO users (email, password) VALUES ('admin', 'admin')")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
-pub async fn drop_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+pub async fn drop_tables(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     for table in TABLES {
-        sqlx::query(&format!("DROP TABLE {};", table))
-            .execute(pool)
+        tx.execute(sqlx::query(&format!("DROP TABLE {};", table)))
             .await?;
     }
     Ok(())

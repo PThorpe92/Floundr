@@ -1,73 +1,46 @@
+use crate::util::{calculate_digest, validate_digest};
 use axum::body::BodyDataStream;
-use axum::extract::{FromRef, FromRequestParts, Multipart};
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::{async_trait, BoxError};
 use bytes::Bytes;
-use futures::{Stream, StreamExt, TryStreamExt};
-use sha2::{Digest, Sha256};
+use futures::{Stream, TryStreamExt};
 use sqlx::{query, SqliteConnection};
 use std::io::{self};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::{fs::File, io::BufWriter};
 use tokio_util::io::StreamReader;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
-pub struct StorageDriver {
-    pub base_path: PathBuf,
-}
-
-pub fn calculate_digest(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
-
-pub fn validate_digest(data: &[u8], digest: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let calculated_digest = calculate_digest(data);
-    if calculated_digest != digest {
-        return Err("Digest mismatch".into());
-    }
-    Ok(())
-}
-
-fn path_is_valid(path: &str) -> bool {
-    let path = std::path::Path::new(path);
-    let mut components = path.components().peekable();
-
-    if let Some(first) = components.peek() {
-        if !matches!(first, std::path::Component::Normal(_)) {
-            return false;
-        }
-    }
-
-    components.count() == 1
+pub struct LocalStorageDriver {
+    base_path: PathBuf,
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for StorageDriver
+impl<S> FromRequestParts<S> for LocalStorageDriver
 where
-    StorageDriver: FromRef<S>,
+    LocalStorageDriver: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = (StatusCode, String);
     async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let storage = StorageDriver::from_ref(state);
+        let storage = LocalStorageDriver::from_ref(state);
         Ok(storage)
     }
 }
 
-impl StorageDriver {
+impl LocalStorageDriver {
     pub fn new(base_path: &Path) -> Self {
         Self {
             base_path: PathBuf::from(base_path),
         }
     }
 
-    pub async fn stream_to_file<S, E>(
+    async fn stream_to_file<S, E>(
         &self,
         path: &str,
         session_id: &str,
@@ -77,7 +50,7 @@ impl StorageDriver {
         S: Stream<Item = Result<Bytes, E>>,
         E: Into<BoxError>,
     {
-        if !path_is_valid(path) {
+        if !crate::util::path_is_valid(path) {
             return Err("Invalid path".to_string());
         }
         async {
@@ -100,11 +73,14 @@ impl StorageDriver {
         .map_err(|err| err.to_string())
     }
 
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
     pub async fn write_blob(
         &self,
-        pool: &mut SqliteConnection,
         name: &str,
         session_id: &str,
+        pool: &mut SqliteConnection,
         data: BodyDataStream,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let path = self.stream_to_file("blobs", session_id, data).await?;
@@ -117,9 +93,9 @@ impl StorageDriver {
             .to_string_lossy()
             .to_string();
         tokio::fs::rename(path, &file_path).await?;
-        query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
+        let _ = query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
         .execute(pool)
-        .await?;
+        .await;
         Ok(digest)
     }
 
@@ -159,7 +135,6 @@ impl StorageDriver {
         let mut file = File::open(row.file_path).await?;
         let mut data = Vec::new();
         validate_digest(&data, digest)?;
-
         file.read_to_end(&mut data).await?;
         Ok(data)
     }
@@ -173,7 +148,6 @@ impl StorageDriver {
         let row = sqlx::query!("SELECT file_path FROM manifests m JOIN repositories r on m.repository_id = r.id WHERE m.digest = ? AND r.name = ?", digest, name)
             .fetch_one(conn)
             .await?;
-
         let mut file = File::open(row.file_path).await?;
         let mut data = Vec::new();
         file.read_to_end(&mut data).await?;
@@ -194,12 +168,13 @@ impl StorageDriver {
             return Err(err.into());
         }
         if query!(
-            "SELECT COUNT(*) as num FROM repositories WHERE name = ?",
+            "SELECT COUNT(*) as count FROM repositories WHERE name = ?",
             name
         )
         .fetch_one(&mut *conn)
         .await?
-        .num == 0
+        .count
+            == 0
         {
             query!("INSERT INTO repositories (name) VALUES (?)", name)
                 .execute(&mut *conn)
@@ -261,19 +236,14 @@ impl StorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         reference: &str,
-        mut data: Multipart,
+        data: BodyDataStream,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let path = self.base_path.join(name).join(reference);
-        let mut file = File::create(&path).await?;
-        while let Some(mut field) = data.next_field().await? {
-            while let Some(chunk) = field.next().await {
-                file.write_all(&chunk?).await?;
-            }
-        }
-        let digest = calculate_digest(&std::fs::read(&path)?);
+        let path = self.stream_to_file("manifests", reference, data).await?;
+        let digest = calculate_digest(&tokio::fs::read(&path).await?);
         let file_path = self
             .base_path
             .join(name)
+            .join("manifests")
             .join(&digest)
             .to_string_lossy()
             .to_string();
@@ -327,6 +297,29 @@ impl StorageDriver {
         query!("DELETE FROM manifests WHERE id = ?", row.1)
             .execute(pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn create_repository(
+        &self,
+        pool: &mut SqliteConnection,
+        name: &str,
+        is_pub: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        query!(
+            "INSERT INTO repositories (name, is_public) VALUES (?, ?)",
+            name,
+            is_pub
+        )
+        .execute(pool)
+        .await?;
+        debug!("Created new repository: {}", name);
+        let path = self.base_path.join(name);
+        debug!("creating path: {:?}", path);
+        match tokio::fs::create_dir_all(&path).await {
+            Ok(_) => debug!("Created new repository directory: {:?}", name),
+            Err(e) => debug!("Error creating new repository directory: {:?}", e),
+        }
         Ok(())
     }
 }

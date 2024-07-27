@@ -5,3 +5,6 @@ pub mod database;
 pub mod endpoints;
 pub mod manifests;
 pub mod storage;
+pub mod storage_driver;
+pub mod util;
+
