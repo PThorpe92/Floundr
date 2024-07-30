@@ -1,8 +1,8 @@
-use std::{io, path::PathBuf};
-
+use crate::{auth::UserInfo, storage_driver::StorageError};
 use futures::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
-use tracing::{debug, error};
+use std::{io, path::PathBuf};
+use tracing::error;
 
 pub static OCI_CONTENT_HEADER: &str = "application/vnd.oci.image.index.v1+json";
 pub static DOCKER_DIGEST: &str = "Docker-Content-Digest";
@@ -13,10 +13,10 @@ pub fn calculate_digest(data: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub fn validate_digest(data: &[u8], digest: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn validate_digest(data: &[u8], digest: &str) -> Result<(), StorageError> {
     let calculated_digest = calculate_digest(data);
     if calculated_digest != digest {
-        return Err("Digest mismatch".into());
+        return Err(StorageError::DigestError);
     }
     Ok(())
 }
@@ -32,6 +32,14 @@ pub fn path_is_valid(path: &str) -> bool {
     }
 
     components.count() == 1
+}
+
+pub fn strip_sha_header(digest: &str) -> String {
+    if digest.starts_with("sha256:") {
+        digest.split(':').nth(1).unwrap().to_string()
+    } else {
+        digest.to_string()
+    }
 }
 
 fn visit(path: impl Into<PathBuf>) -> impl Stream<Item = io::Result<u64>> + Send + 'static {
@@ -64,7 +72,6 @@ fn visit(path: impl Into<PathBuf>) -> impl Stream<Item = io::Result<u64>> + Send
 }
 
 pub async fn get_dir_size(path: PathBuf) -> u64 {
-    debug!("calculating size of dir: {:?}", path);
     visit(path)
         .fold(0u64, |acc, entry| async move {
             acc + entry.unwrap_or_else(|e| {
@@ -73,4 +80,29 @@ pub async fn get_dir_size(path: PathBuf) -> u64 {
             })
         })
         .await
+}
+
+pub async fn verify_login(
+    pool: &mut sqlx::SqliteConnection,
+    email: &str,
+    password: &str,
+) -> Result<UserInfo, Box<dyn std::error::Error>> {
+    let user = sqlx::query!("SELECT id, password FROM users WHERE email = ?", email)
+        .fetch_one(pool)
+        .await?;
+    if bcrypt::verify(password, &user.password).map_err(|_| StorageError::InvalidLogin)? {
+        Ok(UserInfo {
+            user_id: user.id.unwrap(),
+            email: email.to_string(),
+        })
+    } else {
+        Err(String::from("Invalid login").into())
+    }
+}
+
+pub fn validate_registration(email: &str, psw: &str, confirm: &str) -> Result<(), String> {
+    if !(psw.eq(confirm) && email.contains("@") && psw.len() >= 8 && email.contains(".")) {
+        return Err("Invalid registration".to_string());
+    }
+    Ok(())
 }

@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod blobs;
 pub mod codes;
 pub mod content_discovery;
@@ -7,4 +8,3 @@ pub mod manifests;
 pub mod storage;
 pub mod storage_driver;
 pub mod util;
-

@@ -19,7 +19,11 @@ pub static TABLES: [&str; 8] = [
 
 pub struct DbConn(pub sqlx::pool::PoolConnection<sqlx::Sqlite>);
 
-pub async fn initdb(path: &str) -> sqlx::Pool<sqlx::Sqlite> {
+pub async fn initdb(
+    path: &str,
+    email: Option<String>,
+    password: Option<String>,
+) -> sqlx::Pool<sqlx::Sqlite> {
     info!("connecting to sqlite db at: {}", path);
     if !std::path::Path::new(&path).exists() {
         tokio::fs::File::create_new(&path)
@@ -32,8 +36,30 @@ pub async fn initdb(path: &str) -> sqlx::Pool<sqlx::Sqlite> {
         .await
         .expect("unable to connect to sqlite db pool");
     let mut conn = pool.acquire().await.expect("unable to acquire connection");
-    migrate(&mut conn).await.expect("unable to migrate db");
+    migrate(&mut conn, email, password)
+        .await
+        .expect("unable to migrate db");
     pool
+}
+
+pub async fn seed_default_user(
+    pool: &mut SqliteConnection,
+    email: Option<String>,
+    psw: Option<String>,
+) -> Result<(), sqlx::Error> {
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let psw = bcrypt::hash(psw.unwrap_or("admin".to_string()), bcrypt::DEFAULT_COST)
+        .expect("unable to hash default password");
+    let email = email.unwrap_or("harbor_admin".to_string());
+    query!(
+        "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
+        uuid,
+        email,
+        psw
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 impl std::ops::Deref for DbConn {
@@ -78,96 +104,32 @@ where
     (StatusCode::NOT_FOUND, err.to_string())
 }
 
-pub async fn migrate_fresh(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+pub async fn migrate_fresh(
+    pool: &mut SqliteConnection,
+    email: Option<String>,
+    psw: Option<String>,
+) -> Result<(), sqlx::Error> {
     drop_tables(pool).await?;
-    migrate(pool).await?;
+    migrate(pool, email, psw).await?;
     Ok(())
 }
 
-pub async fn migrate(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+pub async fn migrate(
+    pool: &mut SqliteConnection,
+    email: Option<String>,
+    psw: Option<String>,
+) -> Result<(), sqlx::Error> {
     let conn = pool.acquire().await?;
-    sqlx::query(
-        r"
-CREATE TABLE IF NOT EXISTS repositories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    is_public BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS blobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id INTEGER NOT NULL,
-    digest TEXT NOT NULL UNIQUE,
-    file_path TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
-);
-CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id INTEGER NOT NULL,
-    tag TEXT NOT NULL,
-    blob_id INTEGER NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id),
-    FOREIGN KEY (blob_id) REFERENCES blobs(id)
-);
-CREATE TABLE IF NOT EXISTS manifests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id INTEGER NOT NULL,
-    digest TEXT NOT NULL UNIQUE,
-    media_type TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
-);
-CREATE TABLE IF NOT EXISTS uploads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id INTEGER NOT NULL,
-    uuid TEXT NOT NULL UNIQUE,
-    blob_id INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id),
-    FOREIGN KEY (blob_id) REFERENCES blobs(id)
-);
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS repository_permissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    repository_id INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
-);
-CREATE TABLE IF NOT EXISTS tokens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    token TEXT NOT NULL UNIQUE,
-    expires TIMESTAMP NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-CREATE TRIGGER IF NOT EXISTS add_user_to_repo_permissions
-AFTER INSERT ON repositories
-  FOR EACH ROW WHEN NEW.is_public = 1
-  BEGIN
-      INSERT INTO repository_permissions (user_id, repository_id)
-      SELECT id, NEW.id FROM users;
-  END;",
-    )
-    .execute(conn)
-    .await?;
-    let conn = pool.acquire().await?;
-    if query!("SELECT id from users WHERE id = 1")
-        .fetch_one(conn)
-        .await
-        .is_err()
+    sqlx::query(&tokio::fs::read_to_string("migrations/01_createtables.sql").await?)
+        .execute(&mut *conn)
+        .await?;
+    if sqlx::query!("SELECT COUNT(*) as user_count from users")
+        .fetch_one(&mut *conn)
+        .await?
+        .user_count
+        .eq(&0)
     {
-        query!("INSERT INTO users (email, password) VALUES ('admin', 'admin')")
-            .execute(pool)
-            .await?;
+        seed_default_user(&mut *conn, email, psw).await?;
     }
     Ok(())
 }

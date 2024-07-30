@@ -22,6 +22,35 @@ where
     }
 }
 
+#[derive(Debug)]
+pub enum StorageError {
+    IoError(std::io::Error),
+    SqlxError(sqlx::Error),
+    DigestError,
+    InvalidLogin,
+}
+impl std::error::Error for StorageError {}
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IoError(e) => write!(f, "IO Error: {}", e),
+            Self::SqlxError(e) => write!(f, "SQLx Error: {}", e),
+            Self::DigestError => write!(f, "Digest mismatch"),
+            Self::InvalidLogin => write!(f, "Login failed"),
+        }
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
+}
+impl From<sqlx::Error> for StorageError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::SqlxError(e)
+    }
+}
 #[derive(Debug, serde::Serialize, Clone)]
 pub enum DriverType {
     Local,
@@ -58,133 +87,141 @@ pub enum Backend {
     Local(LocalStorageDriver),
     // S3(S3StorageDriver),
 }
+// all this just because we can't use trait objects async
+macro_rules! backend_methods {
+    ($enum_name:ident, $($variant:ident),+) => {
+        impl $enum_name {
+            pub fn kind(&self) -> DriverType {
+                match self {
+                    $(Self::$variant(_) => DriverType::$variant,)+
+                }
+            }
+            pub fn base_path(&self) -> &PathBuf {
+                match self {
+                    $(Self::$variant(driver) => driver.base_path(),)+
+                }
+            }
 
+            pub async fn write_blob(
+                &self,
+                name: &str,
+                session_id: &str,
+                pool: &mut SqliteConnection,
+                data: BodyDataStream,
+            ) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.write_blob(name, session_id, pool, data).await,)+
+                }
+            }
+
+            pub async fn write_blob_without_session_id(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                digest: &str,
+                data: BodyDataStream,
+            ) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.write_blob_without_session_id(pool, name, digest, data).await,)+
+                }
+            }
+
+            pub async fn read_blob(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                digest: &str,
+            ) -> Result<Vec<u8>, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.read_blob(pool, name, digest).await,)+
+                }
+            }
+
+            pub async fn read_manifest(
+                &self,
+                path: &str,
+            ) -> Result<Vec<u8>, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.read_manifest(path).await,)+
+                }
+            }
+
+            pub async fn new_session(
+                &self,
+                conn: &mut SqliteConnection,
+                name: &str,
+            ) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.new_session(conn, name).await,)+
+                }
+            }
+
+            pub async fn mount_blob(
+                &self,
+                pool: &mut SqliteConnection,
+                target_name: &str,
+                digest: &str,
+                source_name: Option<&str>,
+            ) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.mount_blob(pool, target_name, digest, source_name).await,)+
+                }
+            }
+
+            pub async fn write_manifest(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                reference: &str,
+                data: BodyDataStream,
+            ) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.write_manifest(pool, name, reference, data).await,)+
+                }
+            }
+
+            pub async fn delete_blob(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                digest: &str,
+            ) -> Result<(), StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.delete_blob(pool, name, digest).await,)+
+                }
+            }
+
+            pub async fn delete_manifest(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                reference: &str,
+            ) -> Result<(), StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.delete_manifest(pool, name, reference).await,)+
+                }
+            }
+
+            pub async fn create_repository(
+                &self,
+                pool: &mut SqliteConnection,
+                name: &str,
+                is_public: bool,
+            ) -> Result<(), StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.create_repository(pool, name, is_public).await,)+
+                }
+            }
+        }
+    };
+}
+
+backend_methods!(Backend, Local /*, S3 */);
 impl Backend {
     pub fn new(driver: DriverType, base_path: PathBuf) -> Self {
         match driver {
             DriverType::Local => Self::Local(LocalStorageDriver::new(&base_path)),
             DriverType::S3 => todo!(),
-        }
-    }
-    pub fn base_path(&self) -> &PathBuf {
-        match self {
-            Self::Local(driver) => driver.base_path(),
-        }
-    }
-    pub fn kind(&self) -> DriverType {
-        match self {
-            Self::Local(_) => DriverType::Local,
-        }
-    }
-    pub async fn write_blob(
-        &self,
-        name: &str,
-        session_id: &str,
-        pool: &mut SqliteConnection,
-        data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.write_blob(name, session_id, pool, data).await,
-        }
-    }
-    pub async fn write_blob_without_session_id(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        digest: &str,
-        data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => {
-                driver
-                    .write_blob_without_session_id(pool, name, digest, data)
-                    .await
-            }
-        }
-    }
-    pub async fn read_blob(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        digest: &str,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.read_blob(pool, name, digest).await,
-        }
-    }
-    pub async fn read_manifest(
-        &self,
-        conn: &mut SqliteConnection,
-        name: &str,
-        digest: &str,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.read_manifest(conn, name, digest).await,
-        }
-    }
-    pub async fn new_session(
-        &self,
-        conn: &mut SqliteConnection,
-        name: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.new_session(conn, name).await,
-        }
-    }
-    pub async fn mount_blob(
-        &self,
-        pool: &mut SqliteConnection,
-        target_name: &str,
-        digest: &str,
-        source_name: Option<&str>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => {
-                driver
-                    .mount_blob(pool, target_name, digest, source_name)
-                    .await
-            }
-        }
-    }
-    pub async fn write_manifest(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        reference: &str,
-        data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.write_manifest(pool, name, reference, data).await,
-        }
-    }
-    pub async fn delete_blob(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        digest: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.delete_blob(pool, name, digest).await,
-        }
-    }
-    pub async fn delete_manifest(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        reference: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.delete_manifest(pool, name, reference).await,
-        }
-    }
-    pub async fn create_repository(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        is_public: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            Self::Local(driver) => driver.create_repository(pool, name, is_public).await,
         }
     }
 }

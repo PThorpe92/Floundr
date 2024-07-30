@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 use ratatui::{
     backend::CrosstermBackend,
@@ -8,11 +9,11 @@ use ratatui::{
     },
     Frame, Terminal,
 };
-use reqwest::Client;
+use reqwest::{header::HeaderMap, Response};
 use serde::Deserialize;
 use std::{
     io::{self, stdout},
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 use tracing::{debug, info};
 use tui_input::{backend::crossterm::EventHandler, Input};
@@ -28,7 +29,6 @@ pub struct App {
     pub running: bool,
     pub config: ConfigFile,
     pub url: String,
-    pub client: reqwest::Client,
     pub cursor: usize,
     pub current_screen: usize,
     pub screen_stack: Vec<screens::ScreenType>,
@@ -72,6 +72,7 @@ pub struct Repo {
     pub file_path: String,
     pub disk_usage: usize,
     pub driver: String,
+    pub num_layers: i64,
 }
 impl Repo {
     pub fn calculate_mb(&self) -> f64 {
@@ -82,6 +83,9 @@ impl Repo {
 lazy_static! {
     pub static ref GLOBAL_REPO_LIST: Arc<RwLock<RepositoryList>> =
         Arc::new(RwLock::new(RepositoryList::default()));
+    pub static ref MANIFESTS: Arc<DashMap<usize, Vec<String>>> = Arc::new(DashMap::new());
+    pub static ref CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    pub static ref HEADERS: OnceLock<HeaderMap> = OnceLock::new();
 }
 
 pub static DEFAULT_SCREENS: &[screens::ScreenType] =
@@ -100,7 +104,6 @@ impl Default for App {
             url,
             config,
             running: true,
-            client: reqwest::Client::new(),
             cursor: 0,
             current_screen: 0,
             screen_stack: DEFAULT_SCREENS.to_vec(),
@@ -156,10 +159,9 @@ impl App {
             InputType::NewRepo => {
                 let public = self.buffer.pop().unwrap_or("".to_string());
                 let name = self.buffer.pop().unwrap_or("".to_string());
-                let client = self.client.clone();
                 let url = self.url.clone();
                 tokio::spawn(async move {
-                    create_repository(client, url, name, public.to_lowercase() == "y").await;
+                    let _ = create_repository(url, name, public.to_lowercase() == "y").await;
                 })
             }
         };
@@ -173,7 +175,7 @@ impl App {
     fn cursor_down(&mut self) {
         let len = GLOBAL_REPO_LIST.read().unwrap().repositories.len();
         self.cursor = match self.cursor.saturating_add(1) {
-            x if x >= len => len - 1,
+            x if x >= len => len,
             x => x,
         };
     }
@@ -200,58 +202,59 @@ impl App {
         }
     }
 
-    pub async fn get_repositories(&mut self) -> AppResult<()> {
-        let res = self
-            .client
-            .get(format!("{}/repositories", self.url))
-            .send()
-            .await?;
-        let repos: RepositoryList = res.json().await?;
-        debug!("{:?}", repos.repositories);
-        *GLOBAL_REPO_LIST.write().unwrap() = repos;
-        Ok(())
-    }
-
     fn quit(&mut self) {
         self.running = false;
     }
 }
 
-pub async fn create_repository(client: Client, url: String, name: String, public: bool) {
+pub async fn create_repository(url: String, name: String, public: bool) -> AppResult<()> {
+    let client = CLIENT.get().unwrap();
     let res = client
         .post(format!("{}/repositories/{}/{}", url, name, public))
         .send()
-        .await
-        .expect("failed to create repository");
+        .await?;
     if res.status().is_success() {
-        let new = client
-            .get(format!("{}/repositories", url))
-            .send()
-            .await
-            .expect("failed to get repos");
+        let new = client.get(format!("{}/repositories", url)).send().await?;
         let repos: RepositoryList = new.json().await.expect("failed to parse repos");
         *GLOBAL_REPO_LIST.write().unwrap() = repos;
         info!("Repository created successfully");
+        Ok(())
     } else {
         debug!("{:?}", res);
         info!("Failed to create repository");
+        Err("Failed to create repository".into())
+    }
+}
+
+pub async fn send_get_request(url: String) -> AppResult<Response> {
+    let client = CLIENT.get().unwrap();
+    let headers = HEADERS.get().unwrap();
+    let req = client.get(url).headers(headers.to_owned()).build()?;
+    info!("sending request {:?}", req);
+    let res = client.execute(req).await?;
+    if res.status().is_success() {
+        Ok(res)
+    } else {
+        Err("Failed to fetch data".into())
     }
 }
 
 pub struct Tui {
     pub app: App,
-    pub client: Client,
     terminal: Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     pub events: AppEventHandler,
 }
 
 impl Tui {
-    pub fn new(term: Terminal<CrosstermBackend<io::Stdout>>, events: AppEventHandler) -> Self {
+    pub fn new(
+        term: Terminal<CrosstermBackend<io::Stdout>>,
+        events: AppEventHandler,
+        app: App,
+    ) -> Self {
         Self {
-            app: App::default(),
+            app,
             terminal: term,
             events,
-            client: Client::new(),
         }
     }
 
@@ -263,6 +266,7 @@ impl Tui {
             let _ = Self::reset();
             panic_hook(panic);
         }));
+
         Ok(())
     }
 
@@ -281,8 +285,34 @@ impl Tui {
         });
         Ok(())
     }
+
     pub async fn refresh_repositories(&mut self) -> AppResult<()> {
-        self.app.get_repositories().await?;
+        self.get_repositories().await?;
+        Ok(())
+    }
+
+    pub async fn get_manifests(&mut self) -> AppResult<()> {
+        let client = CLIENT.get().unwrap();
+        let repos = GLOBAL_REPO_LIST.read().unwrap().repositories.clone();
+        for (idx, repo) in repos.iter().enumerate() {
+            let res = client
+                .get(format!(
+                    "{}/{}/manifests/{}",
+                    repo.name, self.app.url, repo.tags[idx]
+                ))
+                .send()
+                .await?;
+            let manifests: Vec<String> = res.json().await?;
+            MANIFESTS.insert(idx, manifests);
+        }
+        Ok(())
+    }
+
+    pub async fn get_repositories(&mut self) -> AppResult<()> {
+        let resp = send_get_request(format!("{}/repositories", self.app.url)).await?;
+        let repos: RepositoryList = resp.json().await?;
+        debug!("{:?}", repos.repositories);
+        *GLOBAL_REPO_LIST.write().unwrap() = repos;
         Ok(())
     }
 

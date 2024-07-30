@@ -7,7 +7,7 @@ pub mod screens;
 pub struct ConfigFile {
     pub url: Option<String>,
     pub database_url: Option<String>,
-    pub user: Option<String>,
+    pub email: Option<String>,
     pub password: Option<String>,
     pub theme: Option<Theme>,
 }
@@ -35,8 +35,8 @@ impl Default for ConfigFile {
         Self {
             url: Some(url),
             database_url: None,
-            user: None,
-            password: None,
+            email: Some(String::from("harbor_admin")),
+            password: Some(String::from("admin")),
             theme: Some(Theme::default()),
         }
     }
@@ -54,15 +54,15 @@ impl ConfigFile {
         let config_path = std::path::Path::new(&dir);
         if !config_path.exists() {
             std::fs::create_dir_all(config_path).expect("unable to create config directory");
-            let file = std::fs::File::create(config_path.join("harbor_tui.yaml"))
+            let file = std::fs::File::create(config_path.join("harbor_tui.yml"))
                 .expect("unable to create config file");
             let config = Self::default();
             serde_yaml::to_writer(file, &config).expect("unable to write default config");
             config
-        } else if let Ok(file) = std::fs::File::open(config_path.join("config.yaml")) {
+        } else if let Ok(file) = std::fs::File::open(config_path.join("harbor_tui.yml")) {
             serde_yaml::from_reader(file).expect("unable to parse config file")
         } else {
-            let file = std::fs::File::create(config_path.join("config.yaml"))
+            let file = std::fs::File::create(config_path.join("harbor_tui.yml"))
                 .expect("unable to create config file");
             let config = Self::default();
             serde_yaml::to_writer(file, &config).expect("unable to write default config");

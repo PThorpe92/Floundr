@@ -1,4 +1,8 @@
-use crate::util::{calculate_digest, validate_digest};
+use crate::{
+    manifests::ImageManifest,
+    storage_driver::StorageError,
+    util::{calculate_digest, validate_digest},
+};
 use axum::body::BodyDataStream;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
@@ -45,13 +49,16 @@ impl LocalStorageDriver {
         path: &str,
         session_id: &str,
         stream: S,
-    ) -> Result<PathBuf, String>
+    ) -> Result<PathBuf, StorageError>
     where
         S: Stream<Item = Result<Bytes, E>>,
         E: Into<BoxError>,
     {
         if !crate::util::path_is_valid(path) {
-            return Err("Invalid path".to_string());
+            return Err(StorageError::IoError(std::io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid path",
+            )));
         }
         async {
             let body_with_io_error =
@@ -70,7 +77,7 @@ impl LocalStorageDriver {
             Ok::<_, io::Error>(path)
         }
         .await
-        .map_err(|err| err.to_string())
+        .map_err(StorageError::IoError)
     }
 
     pub fn base_path(&self) -> &PathBuf {
@@ -82,7 +89,7 @@ impl LocalStorageDriver {
         session_id: &str,
         pool: &mut SqliteConnection,
         data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, StorageError> {
         let path = self.stream_to_file("blobs", session_id, data).await?;
         let digest = calculate_digest(&tokio::fs::read(&path).await?);
         let file_path = self
@@ -105,7 +112,7 @@ impl LocalStorageDriver {
         name: &str,
         digest: &str,
         data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, StorageError> {
         let path = self.stream_to_file("blobs", digest, data).await?;
         validate_digest(&std::fs::read(&path)?, digest)?;
         let file_path = self
@@ -126,29 +133,20 @@ impl LocalStorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         digest: &str,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<u8>, StorageError> {
         // Retrieve the file path from the database
         let row = query!("SELECT file_path FROM blobs JOIN repositories ON blobs.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", digest, name)
             .fetch_one(pool)
             .await?;
 
-        let mut file = File::open(row.file_path).await?;
+        let mut file = tokio::fs::File::open(row.file_path).await?;
         let mut data = Vec::new();
-        validate_digest(&data, digest)?;
         file.read_to_end(&mut data).await?;
         Ok(data)
     }
 
-    pub async fn read_manifest(
-        &self,
-        conn: &mut SqliteConnection,
-        name: &str,
-        digest: &str,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let row = sqlx::query!("SELECT file_path FROM manifests m JOIN repositories r on m.repository_id = r.id WHERE m.digest = ? AND r.name = ?", digest, name)
-            .fetch_one(conn)
-            .await?;
-        let mut file = File::open(row.file_path).await?;
+    pub async fn read_manifest(&self, path: &str) -> Result<Vec<u8>, StorageError> {
+        let mut file = File::open(path).await?;
         let mut data = Vec::new();
         file.read_to_end(&mut data).await?;
         Ok(data)
@@ -158,14 +156,14 @@ impl LocalStorageDriver {
         &self,
         conn: &mut SqliteConnection,
         name: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, StorageError> {
         let session_id = Uuid::new_v4().to_string();
         info!("creating new session with id: {}", session_id);
         let new_dir = self.base_path.join(name).join(&session_id);
         debug!("creating new directory: {:?}", new_dir);
         if let Err(err) = std::fs::create_dir_all(&new_dir) {
             error!("Error creating directory: {:?}", err);
-            return Err(err.into());
+            return Err(StorageError::IoError(err));
         }
         if query!(
             "SELECT COUNT(*) as count FROM repositories WHERE name = ?",
@@ -192,7 +190,7 @@ impl LocalStorageDriver {
         target_name: &str,
         digest: &str,
         source_name: Option<&str>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, StorageError> {
         let row = if let Some(source_name) = source_name {
             sqlx::query!(
                 "SELECT file_path FROM blobs JOIN repositories ON blobs.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?",
@@ -211,7 +209,6 @@ impl LocalStorageDriver {
             .fetch_optional(&mut *pool)
             .await?
             .is_some_and(|row| row.count > 0);
-
         if !target_exists {
             let target_repository_id =
                 query!("SELECT id FROM repositories WHERE name = ?", target_name)
@@ -237,8 +234,9 @@ impl LocalStorageDriver {
         name: &str,
         reference: &str,
         data: BodyDataStream,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, StorageError> {
         let path = self.stream_to_file("manifests", reference, data).await?;
+        info!("successfully wrote manifest to path: {:?}", path);
         let digest = calculate_digest(&tokio::fs::read(&path).await?);
         let file_path = self
             .base_path
@@ -247,10 +245,28 @@ impl LocalStorageDriver {
             .join(&digest)
             .to_string_lossy()
             .to_string();
-        std::fs::rename(path, &file_path)?;
-        query!("INSERT INTO manifests (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
-        .execute(pool)
+        info!("writing manifest to: {:?}", file_path);
+        if let Err(e) = tokio::fs::rename(&path, &file_path).await {
+            error!("Error renaming manifest file: {:?}", e);
+            // possible the directory doesnt exist
+            let _ = tokio::fs::create_dir_all(self.base_path.join(name).join("manifests")).await;
+            tokio::fs::rename(&path, &file_path).await?;
+        }
+        let img: ImageManifest =
+            serde_json::from_str(&tokio::fs::read_to_string(&file_path).await?).map_err(|_| {
+                StorageError::IoError(std::io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "error deserializing into ImageManifest",
+                ))
+            })?;
+        let cfg = img.config.unwrap_or_default();
+        let record = query!("INSERT INTO manifests (repository_id, digest, file_path, media_type, size, schema_version)
+             VALUES ((select id from repositories where name = ?), ?, ?, ?, ?, ?)",
+            name, digest, file_path, img.media_type, cfg.size, img.schema_version)
+        .execute(&mut *pool)
         .await?;
+        let id = record.last_insert_rowid();
+        query!("INSERT INTO tags (repository_id, tag, manifest_id) VALUES ((SELECT id from repositories where name = ?), ?, ?)", name, reference, id).execute(pool).await?;
         Ok(digest)
     }
 
@@ -259,13 +275,13 @@ impl LocalStorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         digest: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), StorageError> {
         let row = query!("SELECT file_path, blobs.id FROM blobs JOIN repositories ON blobs.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", digest, name)
             .fetch_one(&mut *pool)
             .await?;
         std::fs::remove_file(row.file_path)?;
         query!("DELETE FROM blobs WHERE id = ?", row.id)
-            .execute(pool)
+            .execute(&mut *pool)
             .await?;
         Ok(())
     }
@@ -275,29 +291,59 @@ impl LocalStorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         reference: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), StorageError> {
         // reference can be either a tag OR a digest
         // check if its a tag
-        let row = if let Ok(record) = query!("SELECT b.digest FROM tags JOIN repositories r ON tags.repository_id = r.id JOIN blobs b on b.id = tags.blob_id WHERE tag = ? AND r.name = ?", reference, name)
-            .fetch_one(&mut *pool)
-            .await {
-            // now we have the digest, delete the manifest
-            let row = query!("SELECT file_path, manifests.id as m_id FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", record.digest, name)
-                .fetch_one(&mut *pool)
-                .await?;
-            (row.file_path, row.m_id)
-        } else {
-            // reference is a digest
-            let row = query!("SELECT file_path, manifests.id as m_id FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE digest = ? AND repositories.name = ?", reference, name)
-            .fetch_one(&mut *pool)
+        //check if its a digest
+        if let Ok(found) = sqlx::query!(
+            "SELECT m.file_path, m.id FROM manifests m 
+         JOIN repositories r ON m.repository_id = r.id 
+         WHERE m.digest = ? AND r.name = ?",
+            reference,
+            name
+        )
+        .fetch_one(&mut *pool)
+        .await
+        {
+            info!("found manifest with file_path: {}", found.file_path);
+            tokio::fs::remove_file(found.file_path).await?;
+            // Delete related tags and the manifest in one query
+            sqlx::query!(
+                "DELETE FROM tags WHERE manifest_id = ?; DELETE FROM manifests WHERE id = ?",
+                found.id,
+                found.id
+            )
+            .execute(&mut *pool)
             .await?;
-            (row.file_path, row.m_id)
-        };
-        std::fs::remove_file(row.0)?;
-        query!("DELETE FROM manifests WHERE id = ?", row.1)
-            .execute(pool)
-            .await?;
-        Ok(())
+            return Ok(());
+        }
+
+        // If it's not a manifest digest, check if it's a tag
+        if let Ok(row) = sqlx::query!(
+            "SELECT m.file_path, m.id FROM manifests m 
+         JOIN tags t ON t.manifest_id = m.id 
+         JOIN repositories r ON t.repository_id = r.id
+         WHERE t.tag = ? AND r.name = ?",
+            reference,
+            name
+        )
+        .fetch_one(&mut *pool)
+        .await
+        {
+            info!("found manifest with file_path: {}", row.file_path);
+            tokio::fs::remove_file(row.file_path).await?;
+            // Delete the manifest and the tag in one query
+            sqlx::query!(
+            "DELETE FROM manifests WHERE id = ?; DELETE FROM tags WHERE tag = ? AND repository_id = (SELECT id from repositories WHERE name = ?)",
+            row.id,
+            reference,
+            name,
+        )
+        .execute(&mut *pool)
+        .await?;
+            return Ok(());
+        }
+        Err(StorageError::SqlxError(sqlx::Error::RowNotFound))
     }
 
     pub async fn create_repository(
@@ -305,7 +351,7 @@ impl LocalStorageDriver {
         pool: &mut SqliteConnection,
         name: &str,
         is_pub: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), StorageError> {
         query!(
             "INSERT INTO repositories (name, is_public) VALUES (?, ?)",
             name,

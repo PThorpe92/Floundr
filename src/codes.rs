@@ -39,7 +39,7 @@ where
 {
     pub fn from_code(code: &Code, detail: T) -> Self {
         Self {
-            code: code.clone(),
+            code: code.to_owned(),
             message: code.description().to_string(),
             detail,
         }
@@ -148,10 +148,14 @@ where
     T: Serialize + std::fmt::Debug + Clone,
 {
     fn into_response(self) -> Response {
+        let content_len = serde_json::to_string(&self).unwrap().len();
         let body = Json(self.clone());
         let status = self.code.status_code();
         let mut response = (status, body).into_response();
         self.code.append_warning_header(response.headers_mut());
+        response
+            .headers_mut()
+            .insert("Content-Length", content_len.into());
         response
     }
 }

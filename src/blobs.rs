@@ -2,6 +2,7 @@ use crate::{
     codes::{Code, ErrorResponse},
     database::DbConn,
     storage_driver::Backend,
+    util::strip_sha_header,
 };
 use axum::{
     extract::{Path, Query, Request},
@@ -13,14 +14,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error};
 
-/// GET /v2/:name/blobs/:digest
+/// GET | HEAD /v2/:name/blobs/:digest
 /// to pull a blob from the registry
 pub async fn get_blob(
     Path((name, digest)): Path<(String, String)>,
     DbConn(mut conn): DbConn,
     Extension(blob_storage): Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
-    debug!("GET /v2/{}/blobs/{}", name, digest);
+    let digest = strip_sha_header(&digest);
     match blob_storage.read_blob(&mut conn, &name, &digest).await {
         Ok(data) => {
             let mut headers = HeaderMap::new();
@@ -40,6 +41,7 @@ pub async fn check_blob(
     DbConn(mut conn): DbConn,
 ) -> impl IntoResponse {
     debug!("HEAD /v2/{}/blobs/{}", name, digest);
+    let digest = strip_sha_header(&digest);
     let exists = sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -61,6 +63,7 @@ pub async fn delete_blob(
     storage: Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
     debug!("DELETE /v2/{}/blobs/{}", name, digest);
+    let digest = strip_sha_header(&digest);
     if sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -115,6 +118,7 @@ pub async fn upload_blob(
     request: Request,
 ) -> impl IntoResponse {
     debug!("PUT /v2/{}/blobs/uploads/{}", path.name, path.session_id);
+    let method = request.method().clone();
     match blob_storage
         .write_blob(
             &path.name,
@@ -141,7 +145,23 @@ pub async fn upload_blob(
                     .parse()
                     .unwrap(), // TODO: handle error better
             );
-            (StatusCode::CREATED, headers, "resource created").into_response()
+            headers.append(
+                "Docker-Content-Digest",
+                format!("sha256:{}", result_digest).parse().unwrap(),
+            );
+            match method {
+                axum::http::Method::PATCH => {
+                    (StatusCode::ACCEPTED, headers, "resource created").into_response()
+                }
+                axum::http::Method::PUT => {
+                    (StatusCode::CREATED, headers, "resource created").into_response()
+                }
+                _ => {
+                    error!("unexpected method");
+                    let code = crate::codes::Code::BlobUploadUnknown;
+                    ErrorResponse::from_code(&code, "unexpected method").into_response()
+                }
+            }
         }
         Err(err) => {
             error!("error uploading blob: {:?}", err);

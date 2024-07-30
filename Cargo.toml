@@ -1,15 +1,15 @@
 [package]
-name = "oci_rs"
-version = "0.1.0"
+name = "harbor"
+version = "0.0.1"
 edition = "2021"
 
 [workspace]
 members = ["."]
 
 [dependencies]
-tokio = { version = "1.39.0", features = ["full"] }
+tokio = { version = "1.39.2", features = ["full"] }
 serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.120"
+serde_json = "1.0.121"
 http-body-util = "0.1.2"
 bytes = "1.6.1"
 tracing = "0.1.40"
@@ -32,7 +32,7 @@ sqlx = { version = "0.8.0", features = [
   'uuid',
 ] }
 uuid = { version = "1.10.0", features = ["v4"] }
-clap = { version = "4.5.9", features = ["derive"] }
+clap = { version = "4.5.11", features = ["derive"] }
 dirs = "5.0.1"
 dotenvy = "0.15.7"
 sha2 = "0.10.8"
@@ -41,3 +41,14 @@ tower = "0.4.13"
 tower-http = { version = "0.5.2", features = ["trace"] }
 http = "1.1.0"
 tokio-util = "0.7.11"
+jsonwebtoken = "9.3.0"
+chrono = { version = "0.4.38", features = ["serde"] }
+argon2 = "0.5.3"
+bcrypt = "0.15.1"
+time = { version = "0.3.36", features = ["macros"] }
+axum-extra = { version = "0.9.3", features = [
+  "typed-header",
+  "cookie",
+  "cookie-signed",
+] }
+base64 = "0.22.1"
