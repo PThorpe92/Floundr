@@ -33,6 +33,7 @@ where
     pub message: String,
     pub detail: T,
 }
+
 impl<T> ErrorResponse<T>
 where
     T: std::fmt::Debug + Serialize + Clone,
@@ -88,7 +89,9 @@ impl Code {
     pub fn description(&self) -> &'static str {
         match self {
             Code::BlobUnknown => "blob unknown to registry",
-            Code::BlobUploadInvalid => "blob upload invalid",
+            Code::BlobUploadInvalid => {
+                "blob upload invalid: out of order, Requested Range Not Satisfiable"
+            }
             Code::BlobUploadUnknown => "blob upload unknown to registry",
             Code::DigestInvalid => "provided digest did not match uploaded content",
             Code::ManifestBlobUnknown => {
@@ -109,7 +112,7 @@ impl Code {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Code::BlobUnknown => StatusCode::NOT_FOUND,
-            Code::BlobUploadInvalid => StatusCode::BAD_REQUEST,
+            Code::BlobUploadInvalid => StatusCode::RANGE_NOT_SATISFIABLE,
             Code::BlobUploadUnknown => StatusCode::NOT_FOUND,
             Code::DigestInvalid => StatusCode::BAD_REQUEST,
             Code::ManifestBlobUnknown => StatusCode::NOT_FOUND,

@@ -31,7 +31,7 @@ pub async fn initdb(
             .expect("unable to create sqlite db");
     }
     let pool = SqlitePoolOptions::new()
-        .max_connections(4)
+        .max_connections(8)
         .connect(path)
         .await
         .expect("unable to connect to sqlite db pool");
@@ -39,6 +39,17 @@ pub async fn initdb(
     migrate(&mut conn, email, password)
         .await
         .expect("unable to migrate db");
+    if query!("SELECT COUNT(*) as client_count from clients")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("unable to fetch client count")
+        .client_count
+        .eq(&0)
+    {
+        seed_default_client(&mut conn)
+            .await
+            .expect("unable to seed default client");
+    }
     pool
 }
 
@@ -51,15 +62,44 @@ pub async fn seed_default_user(
     let psw = bcrypt::hash(psw.unwrap_or("admin".to_string()), bcrypt::DEFAULT_COST)
         .expect("unable to hash default password");
     let email = email.unwrap_or("harbor_admin".to_string());
-    query!(
+    let _ = query!(
         "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
         uuid,
         email,
         psw
     )
-    .execute(pool)
+    .execute(&mut *pool)
     .await?;
     Ok(())
+}
+
+pub async fn seed_default_client(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let secret = uuid::Uuid::new_v4().to_string();
+    let id = "harbor_tui";
+    query!(
+        "INSERT INTO clients (client_id, secret, user_id) VALUES (?, ?, (SELECT id FROM users WHERE email = 'harbor_admin'))",
+        id,
+        secret
+    )
+    .execute(&mut *pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn generate_secret(
+    pool: &mut SqliteConnection,
+    client_id: Option<&str>,
+) -> Result<String, sqlx::Error> {
+    let secret = uuid::Uuid::new_v4().to_string();
+    let id = client_id.unwrap_or("harbor_tui");
+    query!(
+        "INSERT INTO clients (client_id, secret) VALUES (?, ?)",
+        id,
+        secret
+    )
+    .execute(&mut *pool)
+    .await?;
+    Ok(secret)
 }
 
 impl std::ops::Deref for DbConn {

@@ -1,5 +1,7 @@
 use crate::{auth::UserInfo, storage_driver::StorageError};
+use base64::{alphabet::URL_SAFE, Engine};
 use futures::{Stream, StreamExt};
+use http::{header::CONTENT_RANGE, HeaderMap};
 use sha2::{Digest, Sha256};
 use std::{io, path::PathBuf};
 use tracing::error;
@@ -30,7 +32,6 @@ pub fn path_is_valid(path: &str) -> bool {
             return false;
         }
     }
-
     components.count() == 1
 }
 
@@ -39,6 +40,36 @@ pub fn strip_sha_header(digest: &str) -> String {
         digest.split(':').nth(1).unwrap().to_string()
     } else {
         digest.to_string()
+    }
+}
+
+pub fn base64_decode(data: &str) -> Result<String, String> {
+    let decoded = base64::engine::GeneralPurpose::new(
+        &URL_SAFE,
+        base64::engine::GeneralPurposeConfig::default(),
+    )
+    .decode(data)
+    .map_err(|_| String::from("Invalid base64"))?;
+    String::from_utf8(decoded).map_err(|_| String::from("Invalid base64"))
+}
+
+pub fn parse_content_length(headers: &HeaderMap) -> i64 {
+    headers
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+pub fn parse_content_range(range: &HeaderMap) -> (i64, i64) {
+    if let Some(range) = range.get(CONTENT_RANGE) {
+        let range = range.to_str().unwrap_or("0-0");
+        let parts: Vec<&str> = range.split('-').collect();
+        let begin = parts.first().unwrap_or(&"0").parse::<i64>().unwrap_or(0);
+        let end = parts.get(1).unwrap_or(&"0").parse::<i64>().unwrap_or(0);
+        (begin, end)
+    } else {
+        (0, 0)
     }
 }
 
@@ -86,13 +117,14 @@ pub async fn verify_login(
     pool: &mut sqlx::SqliteConnection,
     email: &str,
     password: &str,
-) -> Result<UserInfo, Box<dyn std::error::Error>> {
+) -> Result<UserInfo, String> {
     let user = sqlx::query!("SELECT id, password FROM users WHERE email = ?", email)
         .fetch_one(pool)
-        .await?;
-    if bcrypt::verify(password, &user.password).map_err(|_| StorageError::InvalidLogin)? {
+        .await
+        .map_err(|_| String::from("Invalid login"))?;
+    if bcrypt::verify(password, &user.password).map_err(|_| String::from("Invalid login"))? {
         Ok(UserInfo {
-            user_id: user.id.unwrap(),
+            user_id: user.id,
             email: email.to_string(),
         })
     } else {

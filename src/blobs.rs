@@ -2,7 +2,7 @@ use crate::{
     codes::{Code, ErrorResponse},
     database::DbConn,
     storage_driver::Backend,
-    util::strip_sha_header,
+    util::{parse_content_length, parse_content_range, strip_sha_header},
 };
 use axum::{
     extract::{Path, Query, Request},
@@ -10,6 +10,7 @@ use axum::{
     response::IntoResponse,
     Extension,
 };
+use http::header::CONTENT_RANGE;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -100,7 +101,7 @@ pub struct BlobUpload {
     pub session_id: String,
 }
 
-/// PUT /v2/:name/blobs/uploads/:session_id
+/// PUT | PATCH /v2/:name/blobs/uploads/:session_id
 /// to upload a blob
 /// returns a 201 Created with Location header
 /// that contains the digest of the uploaded blob
@@ -170,6 +171,26 @@ pub async fn upload_blob(
         }
     }
 }
+// PATCH /v2/:name/blobs/uploads/:session_id
+// requires Content-Length & Content-Range headers
+
+async fn handle_upload_session_chunk(
+    name: &str,
+    session_id: &str,
+    headers: HeaderMap,
+    DbConn(mut conn): DbConn,
+    storage: Extension<Arc<Backend>>,
+) -> impl IntoResponse {
+    let range = parse_content_range(&headers);
+    let content_len = parse_content_length(&headers);
+    let current_session = sqlx::query!(
+        "SELECT current_chunk FROM uploads where uuid = ?",
+        session_id,
+    )
+    .fetch_one(&mut *conn)
+    .await;
+}
+
 #[derive(serde::Deserialize)]
 pub struct BlobPath {
     pub name: String,

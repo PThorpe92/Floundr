@@ -6,18 +6,21 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::{Frame, Style},
     style::Stylize,
-    widgets::Row,
+    widgets::{Row, StatefulWidget},
 };
 use ratatui::{
     style::Color,
     widgets::{Block, Borders, List, ListItem, Paragraph, Table},
 };
 
+use super::users::render_header;
+
 pub fn repository_screen(frame: &mut Frame, app: &mut App) {
+    render_header(frame, "<-   Home    |    Users   ->");
     let size = frame.size();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .margin(2)
+        .margin(5)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
         .spacing(1)
         .split(size);
@@ -87,7 +90,7 @@ fn render_repo_details(
 ) {
     let details_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)].as_ref())
+        .constraints([Constraint::Length(8), Constraint::Min(0)].as_ref())
         .split(chunks[1]);
 
     let text = format!(
@@ -96,8 +99,8 @@ fn render_repo_details(
         repo.is_public,
         repo.file_path,
         repo.calculate_mb().round(),
-        repo.driver,
         repo.num_layers,
+        repo.driver,
     );
 
     let basic_info = Paragraph::new(text)
@@ -139,36 +142,77 @@ fn render_repo_details(
     frame.render_widget(tags, bottom_half_details[1]);
 }
 
-// pub fn home_screen(frame: &mut Frame, app: &mut App) {
-//     let size = frame.size();
-//     let chunks = Layout::default()
-//         .direction(Direction::Vertical)
-//         .margin(2)
-//         .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
-//         .split(size);
-//     let items = app.screen_stack[app.current_screen]
-//         .items
-//         .iter()
-//         .map(|i| i.as_str());
-//     let selected_style = Style::default()
-//         .bg(ratatui::style::Color::Black)
-//         .fg(ratatui::style::Color::Yellow);
-//     let normal_style = Style::default()
-//         .bg(ratatui::style::Color::Black)
-//         .fg(ratatui::style::Color::White);
-//     let items = items.enumerate().map(|(i, item)| {
-//         let style = if Some(i) == app.screen_stack[app.current_screen].selected {
-//             selected_style
-//         } else {
-//             normal_style
-//         };
-//         ratatui::widgets::ListItem::new(item).style(style)
-//     });
-//     ratatui::widgets::List::new(items)
-//         .block(
-//             ratatui::widgets::Block::default()
-//                 .title("Home")
-//                 .borders(ratatui::widgets::Borders::ALL),
-//         )
-//         .render(chunks[0], frame.buffer_mut(), &mut app.state)
-// }
+pub fn home_screen(frame: &mut Frame, app: &mut App) {
+    render_header(frame, "|   Repositories  ->");
+    let size = frame.size();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(
+            [
+                Constraint::Percentage(8),
+                Constraint::Percentage(12),
+                Constraint::Percentage(70),
+            ]
+            .as_ref(),
+        )
+        .split(size);
+    let items = app.get_items();
+    let selected_style = Style::default()
+        .bg(ratatui::style::Color::Black)
+        .fg(ratatui::style::Color::Yellow);
+    let normal_style = Style::default()
+        .bg(ratatui::style::Color::Black)
+        .fg(ratatui::style::Color::White);
+    let items = items.into_iter().enumerate().map(|(i, item)| {
+        let style = if Some(i) == app.state.selected() {
+            selected_style
+        } else {
+            normal_style
+        };
+        item.style(style).to_owned()
+    });
+    frame.render_widget(
+        ratatui::widgets::Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Thick)
+            .title("Harbor OCI Distrobution Registry")
+            .title_style(Style::default().fg(Color::Yellow)),
+        chunks[2],
+    );
+    frame.render_widget(
+        ratatui::widgets::List::new(items).block(
+            ratatui::widgets::Block::default()
+                .title("Home")
+                .borders(ratatui::widgets::Borders::ALL),
+        ),
+        chunks[1],
+    );
+    frame.render_widget(ratatui::widgets::Paragraph::new(ASCII_ART), chunks[2]);
+}
+#[rustfmt::skip]
+pub static ASCII_ART: &str = 
+r#" 
+┃          ____   ____        ____        _____         _____          _____         _____
+┃         ┃   *| |   *|  ____|\  *\   ___|\   *\   ___|\    *\    ____|\   *\    ___|\   *\
+┃         ┃   *| |   *| /   */\   *\ ┃   *|\   *\ ┃   *|\    *\  /    */\   *\  ┃   *|\   *\
+┃         ┃   *|_|   *|┃   *|  |   *|┃   *| |   *|┃   *| |    *|/    */  \   *\ ┃   *| |   *|
+┃         ┃    .-.   *|┃   *|__|   *|┃   *|/___*/ ┃   *| /_ _*/|    *┃    |   *|┃   *|/___*/
+┃         ┃   *| |   *|┃    .--.   *|┃   *|\   *\ ┃   *|\   *\ |    *┃    |   *|┃   *|\   *\
+┃         ┃   *| |   *|┃   *|  ┃   *|┃   *| ┃   *|┃   *| |   *||\    *\  /   */|┃   *| |   *|
+┃         ┃___*| |___*|┃___*|  ┃___*|┃___*| ┃___*|┃___*|/___*/|| \____*\/___*/ |┃____| |____|
+┃         ┃    | |    |┃    |  ┃    |┃    | ┃    |┃    /     ||\ |    ||    | / ┃    | |    |
+┃         ┃____| |____|┃____|  ┃____|_____| ┃____|____|_____ |/  \|____||____|/ |____| |____|
+┃         \(     )/    \(      ┃)/    \(     )/    \(    )/        \(    )/      \(     )/  
+┃          '     '      '      '      '     '      '    '          '    '        '     '   
+┃                                _________________________
+┃                               |  _________   _________  |
+┃                               (__)       ┃  ┃        (__)
+┃                                  __      ┃  ┃      __
+┃                                  \ \_____┃  ┃_____/ /
+┃                                   \______    ______/
+┃                                          ┃  ┃
+┃                                       __ ┃  ┃ __
+┃                                      (  )┃  ┃(  )
+┃                                       \ \┃  ┃/ /
+┃                                        \_    _/
+┃                                         \____/"#;

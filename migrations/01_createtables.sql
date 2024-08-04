@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS blobs (
     repository_id INTEGER NOT NULL,
     digest TEXT NOT NULL,
     file_path TEXT NOT NULL,
+    upload_session_id TEXT,
     ref_count INTEGER NOT NULL DEFAULT 0,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (repository_id) REFERENCES repositories(id)
 );
@@ -29,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 
 CREATE TABLE IF NOT EXISTS manifests (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     repository_id INTEGER NOT NULL,
     digest TEXT NOT NULL UNIQUE,
     media_type TEXT NOT NULL,
@@ -52,22 +54,20 @@ CREATE TABLE IF NOT EXISTS manifest_layers (
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL PRIMARY KEY,
     repository_id INTEGER NOT NULL,
-    uuid TEXT NOT NULL,
-    blob_id INTEGER,
+    current_chunk INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (repository_id) REFERENCES repositories(id),
-    FOREIGN KEY (blob_id) REFERENCES blobs(id),
-    UNIQUE (repository_id, uuid, blob_id)
+    UNIQUE (repository_id, uuid)
 );
 
 
 CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS repository_permissions (
@@ -81,32 +81,25 @@ CREATE TABLE IF NOT EXISTS repository_permissions (
 CREATE TABLE IF NOT EXISTS clients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id TEXT NOT NULL UNIQUE,
-    secret TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    user_id INTEGER NOT NULL,
+    secret TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account INTEGER NOT NULL,
-    client_id TEXT NOT NULL,
     token TEXT NOT NULL UNIQUE,
+    client_id TEXT UNIQUE,
     expires TIMESTAMP NOT NULL DEFAULT (datetime('now', '+1 day')),
+    FOREIGN KEY (client_id) REFERENCES clients(client_id),
     FOREIGN KEY (account) REFERENCES users(email)
 );
 
+CREATE INDEX IF NOT EXISTS idx_blobs_digest ON blobs (digest);
+CREATE INDEX IF NOT EXISTS idx_upload_session_id ON blobs (upload_session_id);
 
--- if a repository is public, we automatically add each user into the permissions table for that repository
-
-CREATE TRIGGER IF NOT EXISTS add_user_to_repo_permissions
-AFTER INSERT ON repositories
-  FOR EACH ROW WHEN NEW.is_public = 1
-  BEGIN
-      INSERT INTO repository_permissions (user_id, repository_id)
-      SELECT id, NEW.id FROM users;
-  END;
--- if there are no repositories, we add a default public repository
 INSERT INTO repositories (name, is_public)
 SELECT 'default', 1
 WHERE NOT EXISTS (SELECT 1 FROM repositories);
-
-INSERT INTO clients (client_id, secret) SELECT 'harbor_tui', '6f9da386-c2b9-43e2-af17-bf685d981287' WHERE NOT EXISTS (SELECT 1 FROM clients);

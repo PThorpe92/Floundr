@@ -88,8 +88,11 @@ lazy_static! {
     pub static ref HEADERS: OnceLock<HeaderMap> = OnceLock::new();
 }
 
-pub static DEFAULT_SCREENS: &[screens::ScreenType] =
-    &[screens::ScreenType::Home, screens::ScreenType::Repos];
+pub static DEFAULT_SCREENS: &[screens::ScreenType] = &[
+    screens::ScreenType::Home,
+    screens::ScreenType::Repos,
+    screens::ScreenType::Users,
+];
 
 impl Default for App {
     fn default() -> Self {
@@ -164,6 +167,13 @@ impl App {
                     let _ = create_repository(url, name, public.to_lowercase() == "y").await;
                 })
             }
+            InputType::CreateApiKey => {
+                let name = self.buffer.pop().unwrap_or("".to_string());
+                let url = self.url.clone();
+                tokio::spawn(async move {
+                    let _ = create_repository(url, name, false).await;
+                })
+            }
         };
         Ok(())
     }
@@ -181,15 +191,19 @@ impl App {
     }
 
     fn render_screen(&mut self, frame: &mut Frame<'_>) -> AppResult<()> {
-        screens::repos::repository_screen(frame, self);
+        match self.screen_stack[self.current_screen] {
+            screens::ScreenType::Home => screens::repos::home_screen(frame, self),
+            screens::ScreenType::Repos => screens::repos::repository_screen(frame, self),
+            screens::ScreenType::Users => screens::users::user_management_screen(frame, self),
+        }
         Ok(())
     }
 
     pub fn get_items(&self) -> Vec<ratatui::widgets::ListItem> {
         match self.screen_stack[self.current_screen] {
             screens::ScreenType::Home => vec![
-                ratatui::widgets::ListItem::new("Repos"),
-                ratatui::widgets::ListItem::new("Images"),
+                ratatui::widgets::ListItem::new("Repositories"),
+                ratatui::widgets::ListItem::new("Auth + User management"),
             ],
             screens::ScreenType::Repos => GLOBAL_REPO_LIST
                 .read()
@@ -223,6 +237,26 @@ pub async fn create_repository(url: String, name: String, public: bool) -> AppRe
         debug!("{:?}", res);
         info!("Failed to create repository");
         Err("Failed to create repository".into())
+    }
+}
+
+pub async fn create_new_api_key(url: String, name: String) -> AppResult<()> {
+    let client = CLIENT.get().unwrap();
+    let res = client
+        .post(format!("{}/users/{}/tokens/new", url, &name))
+        .headers(HEADERS.get().unwrap().to_owned())
+        .send()
+        .await?;
+    if res.status().is_success() {
+        info!("API key created successfully");
+        let token: String = res.json().await?;
+        let mut file = tokio::fs::File::create("api_key.txt").await?;
+        tokio::io::copy(&mut token.as_bytes(), &mut file).await?;
+        Ok(())
+    } else {
+        debug!("{:?}", res);
+        info!("Failed to create API key");
+        Err("Failed to create API key".into())
     }
 }
 

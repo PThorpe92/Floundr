@@ -7,6 +7,7 @@ pub mod screens;
 pub struct ConfigFile {
     pub url: Option<String>,
     pub database_url: Option<String>,
+    pub secret: Option<String>,
     pub email: Option<String>,
     pub password: Option<String>,
     pub theme: Option<Theme>,
@@ -38,6 +39,7 @@ impl Default for ConfigFile {
             email: Some(String::from("harbor_admin")),
             password: Some(String::from("admin")),
             theme: Some(Theme::default()),
+            secret: None,
         }
     }
 }

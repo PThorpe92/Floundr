@@ -5,15 +5,18 @@ use axum::{
 use clap::Parser;
 use harbor::{
     auth::{auth_middleware, login_user, oauth_token_get, register_user, Auth},
-    blobs::{check_blob, delete_blob, get_blob, handle_upload_blob, upload_blob},
-    content_discovery::{get_tags_list, get_v2},
-    database::{self, initdb, migrate_fresh},
-    manifests::{
-        create_repository, delete_manifest, get_manifest, list_repositories, push_manifest,
+    blobs::{
+        check_blob, delete_blob, get_blob, handle_upload_blob, single_upload_blob,
+        upload_blob_session,
     },
+    content_discovery::{create_repository, get_tags_list, get_v2, list_repositories},
+    database::{self, initdb, migrate_fresh},
+    manifests::{delete_manifest, get_manifest, push_manifest},
     storage_driver::{Backend, DriverType},
+    users::{delete_user, generate_token, get_users},
 };
 use http::Request;
+use sqlx::SqliteConnection;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
@@ -52,6 +55,12 @@ struct App {
     driver: DriverType,
     #[arg(long, default_value = "false", help = "Enable debug mode")]
     debug: bool,
+    #[arg(
+        long,
+        help = "generate new registry secret and write to file",
+        default_missing_value = "secret.txt"
+    )]
+    secret: Option<String>,
 }
 
 #[tokio::main]
@@ -64,27 +73,31 @@ async fn main() {
     subscriber.with(tracing_subscriber::fmt::layer()).init();
     let _ = dotenvy::dotenv().ok();
     let args = App::parse();
-    let home = args.container_home_dir.as_ref().cloned().map_or_else(
-        || {
-            std::env::var("HARBOR_HOME").unwrap_or(
-                dirs::data_local_dir()
-                    .expect("unable to get XDG_LOCAL_DIR")
-                    .join("harbor")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-        },
-        |path| path.to_string_lossy().to_string(),
-    );
-
+    let home = args
+        .container_home_dir
+        .as_ref()
+        .cloned()
+        .map_or_else(
+            || {
+                std::env::var("HARBOR_HOME").unwrap_or(
+                    dirs::data_local_dir()
+                        .expect("unable to get XDG_LOCAL_DIR")
+                        .join("harbor")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            },
+            |path| path.to_string_lossy().to_string(),
+        )
+        .parse::<PathBuf>()
+        .expect("unable to parse home dir");
     let storage = Backend::new(
         DriverType::Local,
-        args.storage_path
-            .unwrap_or_else(|| std::path::Path::new(&home).into()),
+        args.storage_path.as_ref().unwrap_or(&home),
     );
     info!("storage path home: {:?}", storage.base_path());
     let email = args.email.clone();
-    let password = args.password;
+    let password = args.password.clone();
     let pool = initdb(
         &std::path::Path::new(&home)
             .join("harbor.db")
@@ -94,20 +107,7 @@ async fn main() {
     )
     .await;
     let mut conn = pool.acquire().await.expect("unable to acquire connection");
-    if args.migrate_fresh {
-        migrate_fresh(&mut conn, email.clone(), password.clone())
-            .await
-            .expect("unable to migrate database");
-    }
-    if let Some(name) = &args.new_repo {
-        let _ = storage
-            .create_repository(&mut conn, name, args.public.unwrap_or(true))
-            .await;
-    }
-    if args.email.as_ref().is_some() {
-        let _ = database::seed_default_user(&mut conn, email, password).await;
-    }
-
+    let _ = handle_args(&args, &mut conn, &storage).await;
     let host = std::env::var("HOST").unwrap_or("127.0.0.1".to_string());
     let port = args.port.unwrap_or(8080);
     let addr = SocketAddr::from_str(&format!("{host}:{port}")).unwrap_or_else(|_| {
@@ -124,13 +124,23 @@ async fn main() {
         .route("/v2/auth/login", post(login_user))
         .route("/v2/auth/token", get(oauth_token_get))
         .route("/v2/auth/register", post(register_user))
+        .route("/users", get(get_users))
+        .route("/users/:email", delete(delete_user))
+        .route("/users/:email/token", post(generate_token))
         .route("/repositories", get(list_repositories))
         .route("/repositories/:name/:public", post(create_repository))
         .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
+        .route("/v2/:name/blobs/:digest", put(single_upload_blob))
         .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
-        .route("/v2/:name/blobs/uploads/:session_id", put(upload_blob))
-        .route("/v2/:name/blobs/uploads/:session_id", patch(upload_blob))
+        .route(
+            "/v2/:name/blobs/uploads/:session_id",
+            put(upload_blob_session),
+        )
+        .route(
+            "/v2/:name/blobs/uploads/:session_id",
+            patch(upload_blob_session),
+        )
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
         .route("/v2/:name/manifests/:reference", get(get_manifest))
@@ -149,7 +159,7 @@ async fn main() {
                         "http_request",
                         method = %request.method(),
                         uri = %request.uri(),
-                        status_code = tracing::field::Empty,
+                        headers = ?request.headers(),
                     )
                 },
             )),
@@ -160,4 +170,28 @@ async fn main() {
     axum::serve(listener, routes.into_make_service())
         .await
         .expect("unable to start server");
+}
+
+async fn handle_args(args: &App, conn: &mut SqliteConnection, storage: &Backend) {
+    let email = args.email.clone();
+    let password = args.password.clone();
+    if args.migrate_fresh {
+        migrate_fresh(conn, email.clone(), password.clone())
+            .await
+            .expect("unable to migrate database");
+    }
+    if let Some(name) = &args.new_repo {
+        let _ = storage
+            .create_repository(conn, name, args.public.unwrap_or(true))
+            .await;
+    }
+    if args.email.as_ref().is_some() {
+        let _ = database::seed_default_user(conn, email, password).await;
+    }
+    if let Some(ref file) = args.secret {
+        let secret = database::generate_secret(conn, None)
+            .await
+            .expect("unable to generate secret");
+        tokio::fs::write(file, secret).await.unwrap();
+    }
 }

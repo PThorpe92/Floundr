@@ -1,3 +1,5 @@
+use std::fmt::Formatter;
+
 use axum::{
     extract::{Query, Request},
     http::StatusCode,
@@ -20,12 +22,12 @@ use crate::{
     codes::{Code, ErrorResponse},
     content_discovery::DockerLogin,
     database::DbConn,
-    util::{validate_registration, verify_login},
+    util::{base64_decode, validate_registration, verify_login},
 };
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Auth {
-    claims: Option<Claims>,
+    pub claims: Option<Claims>,
 }
 impl Auth {
     pub fn is_valid(&self) -> bool {
@@ -72,7 +74,6 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // TODO: clean this mess up. temp solution to support both cookie and bearer headers
     let headers = req.headers().clone();
     let span = tracing::info_span!("auth_middleware");
     span.record("headers", format!("{:?}", headers));
@@ -89,21 +90,35 @@ pub async fn auth_middleware(
         .unwrap(),
     );
     if let Some(auth_header) = check_headers(&headers) {
-        if let Some(token) = auth_header.split("Bearer ").last() {
-            if validate_bearer(token) {
-                req.extensions_mut().insert(Auth {
-                    claims: Some(Claims::validate_jwt(token).unwrap()),
-                });
-                return Ok(next.run(req).await);
+        match auth_header {
+            header if header.to_lowercase().contains("bearer") => {
+                let token = header
+                    .split("Bearer ")
+                    .last()
+                    .unwrap_or(header.split("bearer ").last().unwrap());
+                if let Ok(claims) = validate_bearer(token, &mut conn).await {
+                    req.extensions_mut().insert(Auth {
+                        claims: Some(claims),
+                    });
+                    return Ok(next.run(req).await);
+                }
             }
-        } else if let Some(token) = auth_header.split("Basic ").last() {
-            if let Ok(claims) = validate_basic_auth(token, &mut conn).await {
-                req.extensions_mut().insert(Auth {
-                    claims: Some(claims),
-                });
-                return Ok(next.run(req).await);
+            header if header.contains("Basic") => {
+                let token = header
+                    .split("Basic ")
+                    .last()
+                    .unwrap_or(header.split("bearer ").last().unwrap());
+                if let Ok(claims) = validate_basic_auth(token, &mut conn).await {
+                    req.extensions_mut().insert(Auth {
+                        claims: Some(claims),
+                    });
+                    return Ok(next.run(req).await);
+                }
             }
-        };
+            _ => {
+                return Err((StatusCode::UNAUTHORIZED, resp_headers).into_response());
+            }
+        }
     } else {
         if is_public_route(req.uri().path()) {
             req.extensions_mut().insert(Auth::default());
@@ -145,7 +160,7 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
     let decoded = String::from_utf8(decoded).unwrap();
     let parts: Vec<&str> = decoded.split(":").collect();
     let user = parts[0];
-    let password = parts[1];
+    let password = parts.get(1).unwrap_or(&"");
     let user_info = verify_login(conn, user, password)
         .await
         .map_err(|e| e.to_string())?;
@@ -154,7 +169,15 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
     Ok(claims)
 }
 
-fn validate_bearer(token: &str) -> bool {
+async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Claims, String> {
+    if let Ok(client_id) = query!("SELECT client_id from clients WHERE secret = ?", token)
+        .fetch_one(&mut *conn)
+        .await
+    {
+        let mut claims = Claims::default();
+        claims.set_sub(client_id.client_id);
+        return Ok(claims);
+    }
     let secret = std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
     let claims = decode::<Claims>(
         token,
@@ -162,7 +185,7 @@ fn validate_bearer(token: &str) -> bool {
         &Validation::default(),
     )
     .map(|data| data.claims);
-    claims.is_ok_and(|c| c.is_valid())
+    claims.map_err(|s| s.to_string())
 }
 
 fn is_public_route(path: &str) -> bool {
@@ -174,11 +197,31 @@ fn is_public_route(path: &str) -> bool {
 pub struct TokenResponse {
     token: String,
 }
+impl TokenResponse {
+    pub fn new(token: &str) -> Self {
+        Self {
+            token: token.to_string(),
+        }
+    }
+}
 pub async fn oauth_token_get(
     DbConn(mut conn): DbConn,
     Query(params): Query<DockerLogin>,
     headers: HeaderMap,
+    req: Request,
 ) -> impl IntoResponse {
+    if let Some(auth) = req.extensions().get::<Auth>() {
+        if let Some(ref claims) = auth.claims {
+            return (
+                StatusCode::OK,
+                serde_json::to_string(&TokenResponse {
+                    token: claims.to_string(),
+                })
+                .unwrap(),
+            )
+                .into_response();
+        }
+    }
     if let Some(auth_header) = headers.get("authorization") {
         let token = auth_header
             .to_str()
@@ -186,26 +229,18 @@ pub async fn oauth_token_get(
             .split("Basic ")
             .last()
             .unwrap();
-        let decoded = base64::engine::GeneralPurpose::new(
-            &URL_SAFE,
-            base64::engine::GeneralPurposeConfig::default(),
-        )
-        .decode(token)
-        .unwrap();
-        let decoded = String::from_utf8(decoded).unwrap();
+        let decoded = base64_decode(token).unwrap_or_else(|e| e);
         let parts: Vec<&str> = decoded.split(":").collect();
         let user = parts[0];
-        let password = parts[1];
+        let password = parts.get(1).unwrap_or(&"");
         match verify_login(&mut conn, user, password).await {
             Ok(user_id) => {
                 let mut claims = Claims::default();
                 claims.set_sub(serde_json::to_string(&user_id).unwrap());
+                let token = claims.to_string();
                 return (
                     StatusCode::OK,
-                    serde_json::to_string(&TokenResponse {
-                        token: claims.to_string(),
-                    })
-                    .unwrap(),
+                    serde_json::to_string(&TokenResponse { token }).unwrap(),
                 )
                     .into_response();
             }
@@ -369,6 +404,21 @@ pub async fn check_auth(
     Ok(())
 }
 
+#[warn(clippy::recursive_format_impl)]
+impl std::fmt::Display for Claims {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        let secret =
+            std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
+        let token = encode(
+            &Header::default(),
+            self,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("failed to encode jwt");
+        write!(f, "{}", token)
+    }
+}
+
 impl Claims {
     pub fn new(email: &str, user_id: &str) -> Self {
         let expiration = chrono::offset::Local::now()
@@ -386,24 +436,12 @@ impl Claims {
         }
     }
 
-    pub fn to_string(&self) -> String {
-        let secret =
-            std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
-        let token = encode(
-            &Header::default(),
-            self,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .expect("failed to encode jwt");
-        token
-    }
-
     pub fn update_jwt(&self) -> String {
         let secret =
             std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
         let expiration = chrono::offset::Local::now()
             .checked_add_days(chrono::Days::new(1))
-            .unwrap();
+            .expect("date failed to add 1 day");
         let claims = Claims {
             sub: self.sub.to_owned(),
             exp: expiration.timestamp_millis() as usize,
