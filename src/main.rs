@@ -6,8 +6,8 @@ use clap::Parser;
 use harbor::{
     auth::{auth_middleware, login_user, oauth_token_get, register_user, Auth},
     blobs::{
-        check_blob, delete_blob, get_blob, handle_upload_blob, single_upload_blob,
-        upload_blob_session,
+        check_blob, delete_blob, get_blob, handle_upload_blob, handle_upload_session_chunk,
+        put_upload_blob,
     },
     content_discovery::{create_repository, get_tags_list, get_v2, list_repositories},
     database::{self, initdb, migrate_fresh},
@@ -131,15 +131,11 @@ async fn main() {
         .route("/repositories/:name/:public", post(create_repository))
         .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
-        .route("/v2/:name/blobs/:digest", put(single_upload_blob))
         .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
+        .route("/v2/:name/blobs/uploads/:session_id", put(put_upload_blob))
         .route(
             "/v2/:name/blobs/uploads/:session_id",
-            put(upload_blob_session),
-        )
-        .route(
-            "/v2/:name/blobs/uploads/:session_id",
-            patch(upload_blob_session),
+            patch(handle_upload_session_chunk),
         )
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
@@ -159,7 +155,6 @@ async fn main() {
                         "http_request",
                         method = %request.method(),
                         uri = %request.uri(),
-                        headers = ?request.headers(),
                     )
                 },
             )),

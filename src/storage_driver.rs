@@ -28,6 +28,7 @@ pub enum StorageError {
     SqlxError(sqlx::Error),
     DigestError,
     InvalidLogin,
+    OutOfOrder,
 }
 impl std::error::Error for StorageError {}
 impl std::fmt::Display for StorageError {
@@ -37,6 +38,7 @@ impl std::fmt::Display for StorageError {
             Self::SqlxError(e) => write!(f, "SQLx Error: {}", e),
             Self::DigestError => write!(f, "Digest mismatch"),
             Self::InvalidLogin => write!(f, "Login failed"),
+            Self::OutOfOrder => write!(f, "Chunk out of order"),
         }
     }
 }
@@ -106,11 +108,12 @@ macro_rules! backend_methods {
                 &self,
                 name: &str,
                 session_id: &str,
+                chunk: i64,
                 pool: &mut SqliteConnection,
                 data: BodyDataStream,
             ) -> Result<String, StorageError> {
                 match self {
-                    $(Self::$variant(driver) => driver.write_blob(name, session_id, pool, data).await,)+
+                    $(Self::$variant(driver) => driver.write_blob(name, session_id, chunk, pool, data).await,)+
                 }
             }
 
@@ -212,15 +215,21 @@ macro_rules! backend_methods {
                     $(Self::$variant(driver) => driver.create_repository(pool, name, is_public).await,)+
                 }
             }
+            pub async fn combine_chunks(
+            &self, pool: &mut SqliteConnection, name: &str, session_id: &str) -> Result<String, StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.combine_chunks(pool, name, session_id).await,)+
+            }
+           }
         }
     };
 }
 
 backend_methods!(Backend, Local /*, S3 */);
 impl Backend {
-    pub fn new(driver: DriverType, base_path: PathBuf) -> Self {
+    pub fn new(driver: DriverType, base_path: &std::path::Path) -> Self {
         match driver {
-            DriverType::Local => Self::Local(LocalStorageDriver::new(&base_path)),
+            DriverType::Local => Self::Local(LocalStorageDriver::new(base_path)),
             DriverType::S3 => todo!(),
         }
     }

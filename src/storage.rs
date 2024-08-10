@@ -47,28 +47,26 @@ impl LocalStorageDriver {
     async fn stream_to_file<S, E>(
         &self,
         path: &str,
-        session_id: &str,
+        filename: &str,
         stream: S,
     ) -> Result<PathBuf, StorageError>
     where
         S: Stream<Item = Result<Bytes, E>>,
         E: Into<BoxError>,
     {
-        if !crate::util::path_is_valid(path) {
-            return Err(StorageError::IoError(std::io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid path",
-            )));
-        }
         async {
             let body_with_io_error =
                 stream.map_err(|err| io::Error::new(io::ErrorKind::Other, err));
             let body_reader = StreamReader::new(body_with_io_error);
             futures::pin_mut!(body_reader);
+            let mut pathbuf = PathBuf::new();
+            for new_path in path.split('/') {
+                pathbuf = pathbuf.join(new_path);
+            }
             if !self.base_path.join(path).exists() {
                 tokio::fs::create_dir_all(self.base_path.join(path)).await?;
             }
-            let path = self.base_path.join(path).join(session_id);
+            let path = self.base_path.join(path).join(filename);
             debug!("streaming to file: {:?}", path);
             let mut file = BufWriter::new(File::create(path.clone()).await?);
 
@@ -83,24 +81,31 @@ impl LocalStorageDriver {
     pub fn base_path(&self) -> &PathBuf {
         &self.base_path
     }
+
     pub async fn write_blob(
         &self,
         name: &str,
         session_id: &str,
+        chunk: i64,
         pool: &mut SqliteConnection,
         data: BodyDataStream,
     ) -> Result<String, StorageError> {
-        let path = self.stream_to_file("blobs", session_id, data).await?;
+        info!("!!!!Writing blob for session: {session_id} chunk # {chunk}!!!!");
+        let rel_path = PathBuf::from(name)
+            .join(session_id)
+            .to_string_lossy()
+            .to_string();
+        let path = self
+            .stream_to_file(&rel_path, &format!("{}", chunk), data)
+            .await?;
         let digest = calculate_digest(&tokio::fs::read(&path).await?);
         let file_path = self
             .base_path
-            .join(name)
-            .join(session_id)
-            .join(&digest)
+            .join(rel_path)
+            .join(&format!("{chunk}"))
             .to_string_lossy()
             .to_string();
-        tokio::fs::rename(path, &file_path).await?;
-        let _ = query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
+        let _ = query!("INSERT INTO blobs (repository_id, digest, file_path, upload_session_id) VALUES ((select id from repositories where name = ?), ?, ?, ?)", name, digest, file_path, session_id)
         .execute(pool)
         .await;
         Ok(digest)
@@ -118,7 +123,6 @@ impl LocalStorageDriver {
         let file_path = self
             .base_path
             .join(name)
-            .join("blobs")
             .join(digest)
             .to_string_lossy()
             .to_string();
@@ -157,14 +161,6 @@ impl LocalStorageDriver {
         conn: &mut SqliteConnection,
         name: &str,
     ) -> Result<String, StorageError> {
-        let session_id = Uuid::new_v4().to_string();
-        info!("creating new session with id: {}", session_id);
-        let new_dir = self.base_path.join(name).join(&session_id);
-        debug!("creating new directory: {:?}", new_dir);
-        if let Err(err) = std::fs::create_dir_all(&new_dir) {
-            error!("Error creating directory: {:?}", err);
-            return Err(StorageError::IoError(err));
-        }
         if query!(
             "SELECT COUNT(*) as count FROM repositories WHERE name = ?",
             name
@@ -178,10 +174,59 @@ impl LocalStorageDriver {
                 .execute(&mut *conn)
                 .await?;
         }
+        let session_id = Uuid::new_v4().to_string();
+        info!("creating new session with id: {}", session_id);
+        let new_dir = self.base_path.join(name).join("blobs").join(&session_id);
+        debug!("creating new directory: {:?}", new_dir);
+        if let Err(err) = std::fs::create_dir_all(&new_dir) {
+            error!("Error creating directory: {:?}", err);
+            return Err(StorageError::IoError(err));
+        }
         query!("INSERT INTO uploads (repository_id, uuid) VALUES ((SELECT id FROM repositories WHERE name = ?), ?)", name, session_id)
             .execute(conn)
             .await?;
         Ok(session_id)
+    }
+
+    pub async fn combine_chunks(
+        &self,
+        pool: &mut SqliteConnection,
+        name: &str,
+        session_id: &str,
+    ) -> Result<String, StorageError> {
+        let rows = query!(
+            "SELECT file_path, chunk_count FROM blobs JOIN repositories ON blobs.repository_id = repositories.id WHERE upload_session_id = ? AND repositories.name = ? ORDER BY chunk_count ASC",
+            session_id, name
+        )
+        .fetch_all(&mut *pool)
+        .await?;
+        let mut data = Vec::new();
+        for row in rows.iter() {
+            let mut file = tokio::fs::File::open(&row.file_path).await?;
+            let mut chunk_data = Vec::new();
+            file.read_to_end(&mut chunk_data).await?;
+            data.extend(chunk_data);
+            sqlx::query!(
+                "DELETE FROM blobs WHERE upload_session_id = ? AND chunk_count = ?",
+                session_id,
+                row.chunk_count
+            )
+            .execute(&mut *pool)
+            .await?;
+        }
+        let digest = calculate_digest(&data);
+        let file_path = self
+            .base_path
+            .join(name)
+            .join("blobs")
+            .join(&digest)
+            .to_string_lossy()
+            .to_string();
+        tokio::fs::write(&file_path, &mut data).await?;
+        let _ = query!("INSERT INTO blobs (repository_id, digest, file_path) VALUES ((select id from repositories where name = ?), ?, ?)", name, digest, file_path)
+        .execute(pool)
+        .await;
+        Ok(digest)
     }
 
     pub async fn mount_blob(

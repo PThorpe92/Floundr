@@ -1,0 +1,13 @@
+services:
+  rev_proxy:
+    image: nginx:alpine-slim
+    ports:
+      - 80:80
+    command: "nginx -g 'daemon off;'"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./logs:/var/log/nginx/
+    network_mode: host
+    restart: "on-failure"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
