@@ -67,13 +67,17 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password TEXT NOT NULL,
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS repository_permissions (
+CREATE TABLE IF NOT EXISTS repository_scopes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     repository_id INTEGER NOT NULL,
+    push BOOLEAN NOT NULL DEFAULT FALSE,
+    pull BOOLEAN NOT NULL DEFAULT FALSE,
+    del BOOLEAN NOT NULL DEFAULT FALSE,
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (repository_id) REFERENCES repositories(id)
 );
@@ -81,7 +85,7 @@ CREATE TABLE IF NOT EXISTS repository_permissions (
 CREATE TABLE IF NOT EXISTS clients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     secret TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
@@ -99,6 +103,12 @@ CREATE TABLE IF NOT EXISTS tokens (
 
 CREATE INDEX IF NOT EXISTS idx_blobs_digest ON blobs (digest);
 CREATE INDEX IF NOT EXISTS idx_upload_session_id ON blobs (upload_session_id);
+CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);
+CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests (digest);
+CREATE INDEX IF NOT EXISTS idx_manifest_layers_digest ON manifest_layers (digest);
+CREATE INDEX IF NOT EXISTS idx_uploads_uuid ON uploads (uuid);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+CREATE INDEX IF NOT EXISTS idx_repository_scopes_user_id ON repository_scopes (user_id);
 
 INSERT INTO repositories (name, is_public)
 SELECT 'default', 1

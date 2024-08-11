@@ -1,4 +1,6 @@
-# Floundr - Container Distribution Registry + TUI Client
+# Floundr: Container Registry + TUI Client
+
+<img src="config/logo.png" alt="logo" width="140" />
 
 **Floundr** is a WIP Docker container registry written in Rust with Axum, and a TUI client built with [Ratatui](https://github.com/ratatui-org/ratatui)
 The goal is a registry designed to be simple, efficient, and easy to manage, aiming to be fully compliant with

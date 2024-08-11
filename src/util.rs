@@ -1,10 +1,8 @@
 use crate::{auth::UserInfo, storage_driver::StorageError};
+use crate::{Action, UserScope};
 use base64::{alphabet::URL_SAFE, Engine};
-use futures::{Stream, StreamExt};
 use http::{header::CONTENT_RANGE, HeaderMap};
 use sha2::{Digest, Sha256};
-use std::{io, path::PathBuf};
-use tracing::error;
 
 pub static OCI_CONTENT_HEADER: &str = "application/vnd.oci.image.index.v1+json";
 pub static DOCKER_DIGEST: &str = "Docker-Content-Digest";
@@ -74,62 +72,26 @@ pub fn parse_content_range(range: &HeaderMap) -> (i64, i64) {
     }
 }
 
-fn visit(path: impl Into<PathBuf>) -> impl Stream<Item = io::Result<u64>> + Send + 'static {
-    async fn one_level(path: PathBuf, to_visit: &mut Vec<PathBuf>) -> io::Result<Vec<u64>> {
-        let mut dir = tokio::fs::read_dir(&path).await?;
-        let mut files = Vec::new();
-
-        while let Some(child) = dir.next_entry().await? {
-            let metadata = child.metadata().await?;
-            if metadata.is_dir() {
-                to_visit.push(child.path());
-            } else {
-                let size = metadata.len();
-                files.push(size);
-            }
-        }
-
-        Ok(files)
-    }
-    futures::stream::unfold(vec![path.into()], |mut to_visit| async {
-        let path = to_visit.pop()?;
-        let file_stream = match one_level(path, &mut to_visit).await {
-            Ok(files) => futures::stream::iter(files).map(Ok).left_stream(),
-            Err(e) => futures::stream::once(async { Err(e) }).right_stream(),
-        };
-
-        Some((file_stream, to_visit))
-    })
-    .flatten()
-}
-
-pub async fn get_dir_size(path: PathBuf) -> u64 {
-    visit(path)
-        .fold(0u64, |acc, entry| async move {
-            acc + entry.unwrap_or_else(|e| {
-                error!("error getting directory size: {e}");
-                0
-            })
-        })
-        .await
-}
-
 pub async fn verify_login(
     pool: &mut sqlx::SqliteConnection,
     email: &str,
     password: &str,
 ) -> Result<UserInfo, String> {
-    let user = sqlx::query!("SELECT id, password FROM users WHERE email = ?", email)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| String::from("Invalid login"))?;
+    let user = sqlx::query!(
+        "SELECT id, password, is_admin FROM users WHERE email = ?",
+        email
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| String::from("Invalid login"))?;
     if bcrypt::verify(password, &user.password).map_err(|_| String::from("Invalid login"))? {
         Ok(UserInfo {
-            user_id: user.id,
+            id: user.id,
             email: email.to_string(),
+            is_admin: user.is_admin,
         })
     } else {
-        Err(String::from("Invalid login").into())
+        Err(String::from("Invalid login"))
     }
 }
 
@@ -138,4 +100,65 @@ pub fn validate_registration(email: &str, psw: &str, confirm: &str) -> Result<()
         return Err("Invalid registration".to_string());
     }
     Ok(())
+}
+
+use serde::de::{self, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserializer, Serializer};
+use std::fmt;
+
+pub fn scopes_to_vec<S>(scopes: &UserScope, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(scopes.0.len()))?;
+    for (repo, actions) in scopes.0.iter() {
+        for action in actions {
+            seq.serialize_element(&format!("repository:{}:{}", repo, action))?;
+        }
+    }
+    seq.end()
+}
+
+pub fn vec_to_scopes<'de, D>(deserializer: D) -> Result<UserScope, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ScopesVisitor;
+
+    impl<'de> Visitor<'de> for ScopesVisitor {
+        type Value = UserScope;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a list of scope strings")
+        }
+
+        fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+        where
+            V: de::SeqAccess<'de>,
+        {
+            let mut map = UserScope::default();
+
+            while let Some(scope_str) = seq.next_element::<String>()? {
+                let parts: Vec<&str> = scope_str.split(':').collect();
+                if parts.len() == 3 {
+                    map.0
+                        .entry(parts[1].to_string())
+                        .or_insert_with(Vec::new)
+                        .push(match parts[2] {
+                            "pull" => Action::Pull,
+                            "push" => Action::Push,
+                            "delete" => Action::Delete,
+                            _ => return Err(de::Error::custom("Invalid scope format")),
+                        });
+                } else {
+                    return Err(de::Error::custom("Invalid scope format"));
+                }
+            }
+
+            Ok(map)
+        }
+    }
+
+    deserializer.deserialize_seq(ScopesVisitor)
 }

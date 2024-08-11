@@ -1,10 +1,13 @@
 use axum::{
+    middleware::from_fn,
     routing::{delete, get, head, patch, post, put},
     Extension, Router,
 };
 use clap::Parser;
 use floundr::{
-    auth::{auth_middleware, login_user, oauth_token_get, register_user, Auth},
+    auth::{
+        auth_middleware, auth_token_get, check_scope_middleware, login_user, register_user, Auth,
+    },
     blobs::{
         check_blob, delete_blob, get_blob, handle_upload_blob, handle_upload_session_chunk,
         put_upload_blob, put_upload_session_blob,
@@ -92,14 +95,12 @@ async fn main() {
     info!("storage path home: {:?}", storage.base_path());
     let email = args.email.clone();
     let password = args.password.clone();
-    let pool = initdb(
-        &std::path::Path::new(&home)
-            .join("floundr.db")
-            .to_string_lossy(),
-        email.clone(),
-        password.clone(),
-    )
-    .await;
+    let db_url = args
+        .db_path
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| std::env::var("DATABASE_URL").unwrap_or("floundr.db".to_string()));
+    let pool = initdb(&db_url, email.clone(), password.clone()).await;
     let mut conn = pool.acquire().await.expect("unable to acquire connection");
     let _ = handle_args(&args, &mut conn, &storage).await;
     let host = std::env::var("HOST").unwrap_or("127.0.0.1".to_string());
@@ -122,31 +123,58 @@ async fn main() {
     let routes = Router::new()
         .route("/v2/", get(get_v2))
         .route("/v2/auth/login", post(login_user))
-        .route("/v2/auth/token", get(oauth_token_get))
-        .route("/v2/auth/register", post(register_user))
+        .route("/v2/auth/token", get(auth_token_get))
         .route("/users", get(get_users))
-        .route("/users/:email", delete(delete_user))
-        .route("/users/:email/token", post(generate_token))
-        .route("/repositories", get(list_repositories))
-        .route("/repositories/:name/:public", post(create_repository))
-        .route("/v2/:name/blobs/:digest", put(put_upload_blob))
-        .route("/v2/:name/blobs/:digest", get(get_blob))
-        .route("/v2/:name/blobs/:digest", head(check_blob))
-        .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
         .route(
-            "/v2/:name/blobs/uploads/:session_id",
-            put(put_upload_session_blob),
+            "/v2/auth/register",
+            post(register_user).layer(from_fn(check_scope_middleware)),
+        )
+        .route("/repositories", get(list_repositories))
+        .route(
+            "/repositories/:name/:public",
+            post(create_repository).layer(from_fn(check_scope_middleware)),
+        )
+        .route(
+            "/users/:email",
+            delete(delete_user).layer(from_fn(check_scope_middleware)),
+        )
+        .route("/users/:email/token", post(generate_token))
+        .route(
+            "/v2/:name/blobs/:digest",
+            put(put_upload_blob).layer(from_fn(check_scope_middleware)),
+        )
+        .route(
+            "/v2/:name/blobs/:digest",
+            get(get_blob).layer(from_fn(check_scope_middleware)),
+        )
+        .route("/v2/:name/blobs/:digest", head(check_blob))
+        .route(
+            "/v2/:name/blobs/uploads/",
+            post(handle_upload_blob).layer(from_fn(check_scope_middleware)),
         )
         .route(
             "/v2/:name/blobs/uploads/:session_id",
-            patch(handle_upload_session_chunk),
+            put(put_upload_session_blob).layer(from_fn(check_scope_middleware)),
+        )
+        .route(
+            "/v2/:name/blobs/uploads/:session_id",
+            patch(handle_upload_session_chunk).layer(from_fn(check_scope_middleware)),
         )
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
-        .route("/v2/:name/manifests/:reference", get(get_manifest))
+        .route(
+            "/v2/:name/manifests/:reference",
+            get(get_manifest).layer(from_fn(check_scope_middleware)),
+        )
         .route("/v2/:name/manifests/:reference", head(get_manifest))
-        .route("/v2/:name/manifests/:reference", put(push_manifest))
-        .route("/v2/:name/manifests/:reference", delete(delete_manifest))
+        .route(
+            "/v2/:name/manifests/:reference",
+            put(push_manifest).layer(from_fn(check_scope_middleware)),
+        )
+        .route(
+            "/v2/:name/manifests/:reference",
+            delete(delete_manifest).layer(from_fn(check_scope_middleware)),
+        )
         .layer(axum::middleware::from_fn_with_state(
             pool.clone(),
             auth_middleware,

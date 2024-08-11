@@ -15,6 +15,7 @@ use crate::{
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct User {
     id: String,
+    is_admin: bool,
     email: String,
     #[serde(skip_serializing)]
     password: String,
@@ -29,7 +30,7 @@ impl User {
     }
 }
 
-fn check_auth(req: Request) -> bool {
+fn check_auth(req: &Request) -> bool {
     // here we ensure that we are dealing with the tui client
     let headers = req.headers().get("User-Agent");
     if headers.is_some_and(|h| h.to_str().unwrap().contains("floundr-tui")) {
@@ -40,7 +41,7 @@ fn check_auth(req: Request) -> bool {
 }
 
 pub async fn get_users(DbConn(mut conn): DbConn, req: Request) -> impl IntoResponse {
-    if !check_auth(req) {
+    if !check_auth(&req) {
         return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
     }
     let users = sqlx::query_as!(User, "SELECT * FROM users")
@@ -55,7 +56,7 @@ pub async fn delete_user(
     DbConn(mut conn): DbConn,
     req: Request,
 ) -> impl IntoResponse {
-    if !check_auth(req) {
+    if !check_auth(&req) {
         return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
     }
     let _ = sqlx::query!("DELETE FROM users WHERE email = ?", email)
@@ -86,10 +87,10 @@ pub async fn generate_token(
     DbConn(mut conn): DbConn,
     req: Request,
 ) -> impl IntoResponse {
-    if !check_auth(req) {
+    if !check_auth(&req) {
         return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
     }
-    let token = crate::database::generate_secret(&mut *conn, Some(&email))
+    let token = crate::database::generate_secret(&mut conn, Some(&email))
         .await
         .unwrap();
     (
@@ -104,12 +105,12 @@ struct Client {
     #[serde(skip)]
     id: i64,
     client_id: String,
-    user_id: i64,
+    user_id: String,
     secret: String,
     created_at: NaiveDateTime,
 }
 pub async fn list_keys(DbConn(mut conn): DbConn, req: Request) -> impl IntoResponse {
-    if !check_auth(req) {
+    if !check_auth(&req) {
         return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
     }
     let keys = sqlx::query_as!(Client, "SELECT * FROM clients")

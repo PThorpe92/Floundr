@@ -2,7 +2,7 @@ use crate::{
     codes::ErrorResponse,
     database::DbConn,
     storage_driver::Backend,
-    util::{strip_sha_header, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE, OCI_CONTENT_HEADER},
+    util::{strip_sha_header, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE},
 };
 use axum::{
     extract::{Path, Request},
@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
     Extension,
 };
-use http::header::{ACCEPT, CONTENT_TYPE};
+use http::header::CONTENT_TYPE;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -30,9 +30,9 @@ impl Default for ImageManifest {
     fn default() -> Self {
         ImageManifest {
             schema_version: 2,
-            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            media_type: Some(MANIFEST_CONTENT_TYPE.to_string()),
             config: Some(Descriptor {
-                media_type: Some("application/vnd.oci.image.config.v1+json".to_string()),
+                media_type: Some("application/vnd.oci.image.config.v2+json".to_string()),
                 size: 0,
                 digest: "".to_string(),
             }),

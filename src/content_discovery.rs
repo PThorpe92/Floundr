@@ -5,7 +5,6 @@ use crate::{
     codes::{Code, ErrorResponse},
     database::DbConn,
     storage_driver::{Backend, DriverType},
-    util::get_dir_size,
 };
 use axum::{
     extract::{Path, Query, Request},
@@ -127,7 +126,7 @@ pub async fn get_tags_list(
 }
 
 #[derive(Debug, Serialize)]
-pub struct Repo {
+pub struct Repository {
     pub name: String,
     pub is_public: bool,
     pub blob_count: i64,
@@ -147,7 +146,7 @@ pub struct NewRepoQuery {
 
 #[derive(Debug, Serialize)]
 pub struct RepoList {
-    pub repositories: Vec<Repo>,
+    pub repositories: Vec<Repository>,
 }
 
 pub async fn create_repository(
@@ -195,9 +194,10 @@ pub async fn list_repositories(
         let tag_count = repo.get::<i64, _>("tag_count");
         let manifest_count = repo.get::<i64, _>("manifest_count");
         let num_layers = repo.get::<i64, _>("num_layers");
-        let disk_usage =
-            get_dir_size(storage.base_path().join(repo.get::<String, _>("name"))).await;
-        names.push(Repo {
+        let disk_usage = storage
+            .get_dir_size(storage.base_path().join(repo.get::<String, _>("name")))
+            .await;
+        names.push(Repository {
             name: name.clone(),
             is_public,
             blob_count,

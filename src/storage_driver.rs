@@ -103,6 +103,11 @@ macro_rules! backend_methods {
                     $(Self::$variant(driver) => driver.base_path(),)+
                 }
             }
+            pub async fn get_dir_size(&self, path: impl Into<PathBuf>) -> u64 {
+                match self {
+                    $(Self::$variant(driver) => driver.get_dir_size(path).await,)+
+                }
+            }
 
             pub async fn write_blob(
                 &self,

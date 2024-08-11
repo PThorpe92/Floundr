@@ -4,7 +4,8 @@ use axum::{
     http::{request::Parts, StatusCode},
 };
 use sqlx::{query, sqlite::SqlitePoolOptions, Acquire, Executor, SqliteConnection, SqlitePool};
-use tracing::info;
+
+use crate::Repo;
 
 pub static TABLES: [&str; 8] = [
     "repositories",
@@ -24,12 +25,7 @@ pub async fn initdb(
     email: Option<String>,
     password: Option<String>,
 ) -> sqlx::Pool<sqlx::Sqlite> {
-    info!("connecting to sqlite db at: {}", path);
-    if !std::path::Path::new(&path).exists() {
-        tokio::fs::File::create_new(&path)
-            .await
-            .expect("unable to create sqlite db");
-    }
+    println!("connecting to sqlite db at: {}", path);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect(path)
@@ -63,7 +59,7 @@ pub async fn seed_default_user(
         .expect("unable to hash default password");
     let email = email.unwrap_or("floundr_admin".to_string());
     let _ = query!(
-        "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
+        "INSERT INTO users (id, email, password, is_admin) VALUES (?, ?, ?, 1)",
         uuid,
         email,
         psw
@@ -181,4 +177,24 @@ pub async fn drop_tables(pool: &mut SqliteConnection) -> Result<(), sqlx::Error>
             .await?;
     }
     Ok(())
+}
+
+pub async fn get_public_repositories(conn: &mut SqliteConnection) -> Vec<Repo> {
+    sqlx::query!("SELECT id, name, is_public FROM repositories WHERE is_public = 1")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("unable to fetch public repositories")
+        .iter()
+        .map(|r| r.name.parse().unwrap())
+        .collect()
+}
+
+pub async fn get_repositories(conn: &mut SqliteConnection) -> Vec<Repo> {
+    sqlx::query!("SELECT id, name, is_public FROM repositories")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("unable to fetch public repositories")
+        .iter()
+        .map(|r| r.name.parse().unwrap())
+        .collect()
 }

@@ -9,7 +9,7 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::{async_trait, BoxError};
 use bytes::Bytes;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use sqlx::{query, SqliteConnection};
 use std::io::{self};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,35 @@ where
     }
 }
 
+fn visit(path: impl Into<PathBuf>) -> impl Stream<Item = io::Result<u64>> + Send + 'static {
+    async fn one_level(path: PathBuf, to_visit: &mut Vec<PathBuf>) -> io::Result<Vec<u64>> {
+        let mut dir = tokio::fs::read_dir(&path).await?;
+        let mut files = Vec::new();
+
+        while let Some(child) = dir.next_entry().await? {
+            let metadata = child.metadata().await?;
+            if metadata.is_dir() {
+                to_visit.push(child.path());
+            } else {
+                let size = metadata.len();
+                files.push(size);
+            }
+        }
+
+        Ok(files)
+    }
+    futures::stream::unfold(vec![path.into()], |mut to_visit| async {
+        let path = to_visit.pop()?;
+        let file_stream = match one_level(path, &mut to_visit).await {
+            Ok(files) => futures::stream::iter(files).map(Ok).left_stream(),
+            Err(e) => futures::stream::once(async { Err(e) }).right_stream(),
+        };
+
+        Some((file_stream, to_visit))
+    })
+    .flatten()
+}
+
 impl LocalStorageDriver {
     pub fn new(base_path: &Path) -> Self {
         Self {
@@ -44,6 +73,16 @@ impl LocalStorageDriver {
         }
     }
 
+    pub async fn get_dir_size(&self, path: impl Into<PathBuf>) -> u64 {
+        visit(path)
+            .fold(0u64, |acc, entry| async move {
+                acc + entry.unwrap_or_else(|e| {
+                    error!("error getting directory size: {e}");
+                    0
+                })
+            })
+            .await
+    }
     async fn stream_to_file<S, E>(
         &self,
         path: &str,
