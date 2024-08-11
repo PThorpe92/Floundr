@@ -61,7 +61,7 @@ pub async fn seed_default_user(
     let uuid = uuid::Uuid::new_v4().to_string();
     let psw = bcrypt::hash(psw.unwrap_or("admin".to_string()), bcrypt::DEFAULT_COST)
         .expect("unable to hash default password");
-    let email = email.unwrap_or("harbor_admin".to_string());
+    let email = email.unwrap_or("floundr_admin".to_string());
     let _ = query!(
         "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
         uuid,
@@ -75,9 +75,9 @@ pub async fn seed_default_user(
 
 pub async fn seed_default_client(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     let secret = uuid::Uuid::new_v4().to_string();
-    let id = "harbor_tui";
+    let id = "floundr_tui";
     query!(
-        "INSERT INTO clients (client_id, secret, user_id) VALUES (?, ?, (SELECT id FROM users WHERE email = 'harbor_admin'))",
+        "INSERT INTO clients (client_id, secret, user_id) VALUES (?, ?, (SELECT id FROM users WHERE email = 'floundr_admin'))",
         id,
         secret
     )
@@ -91,7 +91,7 @@ pub async fn generate_secret(
     client_id: Option<&str>,
 ) -> Result<String, sqlx::Error> {
     let secret = uuid::Uuid::new_v4().to_string();
-    let id = client_id.unwrap_or("harbor_tui");
+    let id = client_id.unwrap_or("floundr_tui");
     query!(
         "INSERT INTO clients (client_id, secret) VALUES (?, ?)",
         id,

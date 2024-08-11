@@ -13,11 +13,11 @@ use axum::{
     response::{IntoResponse, Response},
     Extension,
 };
-use http::header::CONTENT_RANGE;
+use http::header::{CONTENT_RANGE, RANGE};
 use sqlx::SqliteConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// GET | HEAD /v2/:name/blobs/:digest
 /// to pull a blob from the registry
@@ -119,7 +119,7 @@ pub struct BlobUpload {
 /// Content-Length: <length>
 /// Content-Type: application/octet-stream
 #[tracing::instrument(skip(blob_storage))]
-pub async fn put_upload_blob(
+pub async fn put_upload_session_blob(
     Path((name, session_id)): Path<(String, String)>,
     Query(query): Query<QueryParams>,
     Extension(blob_storage): Extension<Arc<Backend>>,
@@ -189,6 +189,71 @@ async fn finish_upload_session(
     (StatusCode::CREATED, return_headers, "resource created").into_response()
 }
 
+/// PUT /v2/:name/blobs/:session_id?digest=<digest>
+/// because this closes the session, we also need to combine the chunks after
+pub async fn put_upload_blob(
+    Path((name, session_id)): Path<(String, String)>,
+    Extension(storage): Extension<Arc<Backend>>,
+    DbConn(mut conn): DbConn,
+    req: Request,
+) -> impl IntoResponse {
+    let digest = req
+        .headers()
+        .get("digest")
+        .map(|v| v.to_str().unwrap_or("sha256:").to_string())
+        .unwrap_or("sha256:".to_string());
+    let content_len = parse_content_length(req.headers());
+    match storage
+        .write_blob(
+            &name,
+            &session_id,
+            content_len,
+            &mut conn,
+            req.into_body().into_data_stream(),
+        )
+        .await
+    {
+        Ok(_) => match storage.combine_chunks(&mut conn, &name, &session_id).await {
+            Ok(combined_digest) => {
+                if !combined_digest.eq(&digest) {
+                    info!(
+                        "combined chunks digest did not equal digest given:\n {} != {}",
+                        combined_digest, digest
+                    );
+                    let code = crate::codes::Code::DigestInvalid;
+                    return ErrorResponse::from_code(&code, "digest did not match content")
+                        .into_response();
+                }
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    LOCATION,
+                    format!("/v2/{}/blobs/{}", name, combined_digest)
+                        .parse()
+                        .unwrap(),
+                );
+                headers.insert("Docker-Content-Digest", combined_digest.parse().unwrap());
+                (StatusCode::CREATED, headers, "resource created").into_response()
+            }
+            Err(err) => {
+                error!("error combining chunks: {:?}", err);
+                ErrorResponse::from_code(
+                    &crate::codes::Code::BlobUploadUnknown,
+                    String::from("unable to combine chunks"),
+                )
+                .into_response()
+            }
+        },
+        Err(err) => {
+            error!("error uploading blob: {:?}", err);
+            ErrorResponse::from_code(
+                &crate::codes::Code::BlobUploadUnknown,
+                String::from("unable to upload blob"),
+            )
+            .into_response()
+        }
+    }
+}
+
 #[tracing::instrument(skip(storage, conn))]
 async fn upload_chunk(
     name: &str,
@@ -245,10 +310,10 @@ pub async fn handle_upload_session_chunk(
 ) -> impl IntoResponse {
     let headers = request.headers().clone();
     let range = parse_content_range(&headers);
+    let content_len = parse_content_length(&headers);
     match upload_chunk(&name, &session_id, storage.0, &mut conn, request).await {
         Ok(_) => {
-            // insert next chunk into db
-            let next_chunk = range.1 + 1;
+            let next_chunk = if range.1 == 0 { content_len } else { range.1 };
             sqlx::query!(
                 "UPDATE uploads SET current_chunk = ? WHERE uuid = ?",
                 next_chunk,
@@ -260,12 +325,16 @@ pub async fn handle_upload_session_chunk(
             let mut headers = HeaderMap::new();
             headers.insert(
                 LOCATION,
-                format!("/v2/{}/blobs/{}", name, session_id)
+                format!("/v2/{}/blobs/uploads/{}", name, session_id)
                     .parse()
                     .unwrap(),
             );
-            headers.insert(CONTENT_RANGE, format!("0-{}", next_chunk).parse().unwrap());
-            (StatusCode::ACCEPTED, headers, "resource created").into_response()
+            headers.insert(RANGE, format!("0-{}", next_chunk).parse().unwrap());
+            headers.insert(CONTENT_LENGTH, "0".parse().unwrap());
+            headers.insert("Docker-Upload-UUID", session_id.parse().unwrap());
+            let resp = (StatusCode::ACCEPTED, headers).into_response();
+            info!("{:?}", resp);
+            resp
         }
         Err(err) => {
             error!("error uploading blob: {:?}", err);

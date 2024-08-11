@@ -2,7 +2,7 @@ use crate::{
     codes::ErrorResponse,
     database::DbConn,
     storage_driver::Backend,
-    util::{strip_sha_header, DOCKER_DIGEST, OCI_CONTENT_HEADER},
+    util::{strip_sha_header, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE, OCI_CONTENT_HEADER},
 };
 use axum::{
     extract::{Path, Request},
@@ -10,14 +10,14 @@ use axum::{
     response::IntoResponse,
     Extension,
 };
-use http::header::CONTENT_TYPE;
+use http::header::{ACCEPT, CONTENT_TYPE};
 use std::sync::Arc;
 use tracing::{error, info};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageManifest {
     pub schema_version: i32,
@@ -42,7 +42,7 @@ impl Default for ImageManifest {
     }
 }
 
-#[derive(Deserialize, Default, Debug, Clone)]
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Descriptor {
     pub media_type: Option<String>,
@@ -50,7 +50,7 @@ pub struct Descriptor {
     pub digest: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageConfig {
     pub architecture: String,
@@ -62,7 +62,7 @@ pub struct ImageConfig {
     pub history: Vec<History>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub env: Option<Vec<String>>,
@@ -71,14 +71,14 @@ pub struct Config {
     pub labels: Option<HashMap<String, String>>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RootFS {
     pub type_: String,
     pub diff_ids: Vec<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct History {
     pub created: Option<String>,
@@ -116,7 +116,10 @@ pub async fn push_manifest(
                     .parse()
                     .unwrap(),
             );
-            headers.insert("Docker-Content-Digest", digest.parse().unwrap());
+            headers.insert(
+                "Docker-Content-Digest",
+                format!("sha256:{}", digest).parse().unwrap(),
+            );
             (StatusCode::CREATED, headers).into_response()
         }
         Err(err) => {
@@ -131,6 +134,7 @@ pub async fn push_manifest(
 /// endpoint. The server must return the manifest of the image specified by the name and reference.
 /// GET /v2/:name/manifests/:reference
 /// spec: 145-184
+#[tracing::instrument(skip(conn, blob_storage))]
 pub async fn get_manifest(
     Path((name, digest)): Path<(String, String)>,
     Extension(blob_storage): Extension<Arc<Backend>>,
@@ -142,35 +146,42 @@ pub async fn get_manifest(
     // if it is a tag, we need to look up the digest
     // if it is a digest, we can look up the manifest directly
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, OCI_CONTENT_HEADER.parse().unwrap());
-    if let Ok(record) = sqlx::query!("SELECT digest, file_path FROM manifests m JOIN tags t ON t.manifest_id = m.id WHERE t.repository_id = (SELECT id FROM repositories WHERE name = ?) AND t.tag = ?", name, reference)
+    let name_ref = &name;
+    let ref_reference = &reference;
+    if let Ok(record) = sqlx::query!("SELECT digest, file_path FROM manifests m JOIN tags t ON t.manifest_id = m.id WHERE t.repository_id = (SELECT id FROM repositories WHERE name = ?) AND t.tag = ?", name_ref, ref_reference)
        .fetch_one(&mut *conn)
        .await {
        let digest = record.digest;
        let file_path = record.file_path;
         match blob_storage.read_manifest(&file_path).await {
             Ok(data) => {
-            info!("manifest found for image: {} with digest: {} and path {}", name, digest, file_path);
-            headers.insert(DOCKER_DIGEST, format!("sha256:{}", digest).parse().unwrap());
-            match *req.method() {
-                http::Method::HEAD => return (StatusCode::OK, headers).into_response(),
-                http::Method::GET => return (StatusCode::OK, headers, data).into_response(),
-                _ => unreachable!(),
-            }
-            }
-            Err(_) => {
-            let code = crate::codes::Code::ManifestUnknown;
-            ErrorResponse::from_code(&code, "unable to find manifest for image").into_response()
-            }
-        };
-    };
+            headers.insert(DOCKER_DIGEST,  digest.parse().unwrap());
+            headers.insert(CONTENT_TYPE, MANIFEST_CONTENT_TYPE.parse().unwrap());
+                    match *req.method() {
+                        http::Method::HEAD => { return (StatusCode::OK, headers).into_response(); }
+                        http::Method::GET =>  {
+                            let resp = (StatusCode::OK, headers, data).into_response();
+                            tracing::info!("response: {:?}", resp);
+                            return resp;
+                            }
+                    _ => unreachable!(),
+                     }
+                    }
+          Err(_) => {
+                error!("unable to find manifest with provided file_path and digest {} : {}", file_path, digest);
+                let code = crate::codes::Code::ManifestUnknown;
+                ErrorResponse::from_code(&code, "unable to find manifest for image").into_response()
+          }
+      };
+    }
     if let Ok(record) = sqlx::query!("SELECT file_path, digest FROM manifests WHERE repository_id = (SELECT id FROM repositories WHERE name = ?) AND digest = ?", name, reference)
           .fetch_one(&mut *conn)
           .await {
         info!("found manifest for image reference: {}", reference);
         match blob_storage.read_manifest(&record.file_path).await {
             Ok(data) => {
-                headers.insert(DOCKER_DIGEST, format!("sha256:{}", record.digest).parse().unwrap());
+            headers.insert(DOCKER_DIGEST, format!("sha256:{}", record.digest).parse().unwrap());
+            headers.insert(CONTENT_TYPE, MANIFEST_CONTENT_TYPE.parse().unwrap());
                 match *req.method()  {
                     http::Method::HEAD => return (StatusCode::OK, headers).into_response(),
                     _ => return (StatusCode::OK, headers, data).into_response(),

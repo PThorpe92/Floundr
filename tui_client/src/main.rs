@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut value,
     );
     let token_value = HeaderValue::from_str(&format!("Basic {}", value))?;
-    let user_agent = HeaderValue::from_str("harbor-tui")?;
+    let user_agent = HeaderValue::from_str("floundr-tui")?;
     info!("user agent is {:?}", user_agent);
     info!("token value is {:?}", token_value);
     headers.append(USER_AGENT, user_agent);
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tui = Tui::new(terminal, AppEventHandler::new(100), app);
     tui.init()?;
     if tui.get_repositories().await.is_err() {
-        println!("Unable to fetch repositories, please set the HARBOR_URL env var, or the url in the config file to connect to the harbor registry");
+        println!("Unable to fetch repositories, please set the FLOUNDR_URL env var, or the url in the config file to connect to the registry");
     }
     while tui.app.running {
         let _ = tui.draw();
@@ -73,9 +73,9 @@ async fn login_basic(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = HeaderMap::new();
     let mut value = String::new();
     base64::engine::GeneralPurpose::new(&URL_SAFE, GeneralPurposeConfig::default())
-        .encode_string("harbor_admin:admin", &mut value);
+        .encode_string("floundr_admin:admin", &mut value);
     let token_value = HeaderValue::from_str(&format!("Basic {}", value))?;
-    let user_agent = HeaderValue::from_str("harbor-tui")?;
+    let user_agent = HeaderValue::from_str("floundr-tui")?;
     headers.append(USER_AGENT, user_agent.clone());
     headers.append(AUTHORIZATION, token_value);
     let response = client
@@ -99,7 +99,7 @@ async fn login_bearer(
     secret: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token_value = HeaderValue::from_str(&format!("Bearer {}", secret))?;
-    let user_agent = HeaderValue::from_str("harbor-tui")?;
+    let user_agent = HeaderValue::from_str("floundr-tui")?;
     let client = Client::default();
     headers.insert(USER_AGENT, user_agent.clone());
     headers.insert(AUTHORIZATION, token_value);

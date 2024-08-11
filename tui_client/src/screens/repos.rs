@@ -175,7 +175,7 @@ pub fn home_screen(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
         ratatui::widgets::Block::bordered()
             .border_type(ratatui::widgets::BorderType::Thick)
-            .title("Harbor OCI Distrobution Registry")
+            .title("Floundr OCI Distrobution Registry")
             .title_style(Style::default().fg(Color::Yellow)),
         chunks[2],
     );
@@ -203,39 +203,18 @@ pub fn home_screen(frame: &mut Frame, app: &mut App) {
             vertical: 5,
         }),
     );
-    // frame.render_widget(
-    //     ratatui::widgets::Paragraph::new(ASCII_ART),
-    //     chunks[2].inner(ratatui::layout::Margin {
-    //         horizontal: match chunks[2].width {
-    //             5..=20 => 2,
-    //             21..=40 => 4,
-    //             41..=60 => 6,
-    //             61..=80 => 8,
-    //             _ => 10,
-    //         },
-    //         vertical: 5,
-    //     }),
-    // );
 }
 #[rustfmt::skip]
 pub static ASCII_ART: &str = 
 r#" 
 
-   ______            __        _       ____  _____
-  / ____/___  ____  / /_____ _(_)___  / __ \/ ___/
- / /   / __ \/ __ \/ __/ __ `/ / __ \/ /_/ /\__ \
-/ /___/ /_/ / / / / /_/ /_/ / / / / / _, _/___/ /
-\____/\____/_/ /_/\__/\__,_/_/_/ /_/_/ |_|/____/
-
-          _________________________
-         |  _________   _________  |
-         (__)       ┃  ┃        (__)
-         __      ┃  ┃      __
-         \ \_____┃  ┃_____/ /
-           \______    ______/
-              ┃  ┃
-             __ ┃  ┃ __
-              (  )┃  ┃(  )
-               \ \┃  ┃/ /
-                \_    _/
-                  \____/"#;
+  █████▒██▓     ▒█████   █    ██  ███▄    █ ▓█████▄  ██▀███  
+▓██   ▒▓██▒    ▒██▒  ██▒ ██  ▓██▒ ██ ▀█   █ ▒██▀ ██▌▓██ ▒ ██▒
+▒████ ░▒██░    ▒██░  ██▒▓██  ▒██░▓██  ▀█ ██▒░██   █▌▓██ ░▄█ ▒
+░▓█▒  ░▒██░    ▒██   ██░▓▓█  ░██░▓██▒  ▐▌██▒░▓█▄   ▌▒██▀▀█▄  
+░▒█░   ░██████▒░ ████▓▒░▒▒█████▓ ▒██░   ▓██░░▒████▓ ░██▓ ▒██▒
+ ▒ ░   ░ ▒░▓  ░░ ▒░▒░▒░ ░▒▓▒ ▒ ▒ ░ ▒░   ▒ ▒  ▒▒▓  ▒ ░ ▒▓ ░▒▓░
+ ░     ░ ░ ▒  ░  ░ ▒ ▒░ ░░▒░ ░ ░ ░ ░░   ░ ▒░ ░ ▒  ▒   ░▒ ░ ▒░
+ ░ ░     ░ ░   ░ ░ ░ ▒   ░░░ ░ ░    ░   ░ ░  ░ ░  ░   ░░   ░ 
+           ░  ░    ░ ░     ░              ░    ░       ░     
+                                             ░"#;

@@ -13,7 +13,7 @@ use futures::{Stream, TryStreamExt};
 use sqlx::{query, SqliteConnection};
 use std::io::{self};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{fs::File, io::BufWriter};
 use tokio_util::io::StreamReader;
 use tracing::{debug, error, info};
@@ -92,6 +92,7 @@ impl LocalStorageDriver {
     ) -> Result<String, StorageError> {
         info!("!!!!Writing blob for session: {session_id} chunk # {chunk}!!!!");
         let rel_path = PathBuf::from(name)
+            .join("blobs")
             .join(session_id)
             .to_string_lossy()
             .to_string();
@@ -304,12 +305,23 @@ impl LocalStorageDriver {
                     "error deserializing into ImageManifest",
                 ))
             })?;
+        let mut file = tokio::fs::File::create(file_path.clone()).await?;
+        file.write_all(&serde_json::to_vec(&img).unwrap()).await?;
         let cfg = img.config.unwrap_or_default();
         let record = query!("INSERT INTO manifests (repository_id, digest, file_path, media_type, size, schema_version)
              VALUES ((select id from repositories where name = ?), ?, ?, ?, ?, ?)",
             name, digest, file_path, img.media_type, cfg.size, img.schema_version)
         .execute(&mut *pool)
         .await?;
+        for layer in img.layers {
+            query!("INSERT INTO manifest_layers (manifest_id, repository_id, digest, size, media_type) VALUES ((SELECT id from manifests WHERE digest = ?), (SELECT id from repositories where name = ?), ?, ?, ?)", digest, name, layer.digest, layer.size, layer.media_type).execute(&mut *pool).await?;
+            query!(
+                "UPDATE blobs SET ref_count = ref_count + 1 WHERE digest = ?",
+                layer.digest
+            )
+            .execute(&mut *pool)
+            .await?;
+        }
         let id = record.last_insert_rowid();
         query!("INSERT INTO tags (repository_id, tag, manifest_id) VALUES ((SELECT id from repositories where name = ?), ?, ?)", name, reference, id).execute(pool).await?;
         Ok(digest)
@@ -406,10 +418,34 @@ impl LocalStorageDriver {
         .await?;
         debug!("Created new repository: {}", name);
         let path = self.base_path.join(name);
-        debug!("creating path: {:?}", path);
-        match tokio::fs::create_dir_all(&path).await {
-            Ok(_) => debug!("Created new repository directory: {:?}", name),
-            Err(e) => debug!("Error creating new repository directory: {:?}", e),
+        let paths = &[&path, &path.join("blobs"), &path.join("manifests")];
+        for p in paths {
+            match tokio::fs::create_dir_all(*p).await {
+                Ok(_) => debug!("Created file path {:?} for test repository: {:?}", *p, name),
+                Err(e) => debug!("Error creating new repository directory: {:?}", e),
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run_garbage_collection(
+        &self,
+        pool: &mut SqliteConnection,
+    ) -> Result<(), StorageError> {
+        let rows = query!("SELECT digest, ref_count FROM blobs")
+            .fetch_all(&mut *pool)
+            .await?;
+        for row in rows.iter() {
+            if row.ref_count == 0 {
+                let path = query!("SELECT file_path FROM blobs WHERE digest = ?", row.digest)
+                    .fetch_one(&mut *pool)
+                    .await?
+                    .file_path;
+                tokio::fs::remove_file(path).await?;
+                query!("DELETE FROM blobs WHERE digest = ?", row.digest)
+                    .execute(&mut *pool)
+                    .await?;
+            }
         }
         Ok(())
     }

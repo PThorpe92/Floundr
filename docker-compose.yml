@@ -6,8 +6,32 @@ services:
     command: "nginx -g 'daemon off;'"
     volumes:
       - ./config/nginx.conf:/etc/nginx/conf.d/default.conf
-      - ./logs:/var/log/nginx/
+      - logs:/var/log/nginx/
+      - logs:/var/cache/nginx/client_temp/
     network_mode: host
     restart: "on-failure"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  compliance_testing:
+    image: opencontainers/distribution-spec@main
+    environment:
+      - OCI_ROOT_URL=https://myreg.io
+      - OCI_NAMESPACE=mytestorg/mytestrepo
+      - OCI_USERNAME=floundr_admin
+      - OCI_PASSWORD=admin
+      - OCI_TEST_PULL=1
+      - OCI_TEST_PUSH=1
+      - OCI_TEST_CONTENT_DISCOVERY=1
+      - OCI_TEST_CONTENT_MANAGEMENT=1
+      - OCI_HIDE_SKIPPED_WORKFLOWS=0
+      - OCI_DEBUG=0
+      - OCI_DELETE_MANIFEST_BEFORE_BLOBS=0
+
+volumes:
+  logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./logs

@@ -3,11 +3,11 @@ use axum::{
     Extension, Router,
 };
 use clap::Parser;
-use harbor::{
+use floundr::{
     auth::{auth_middleware, login_user, oauth_token_get, register_user, Auth},
     blobs::{
         check_blob, delete_blob, get_blob, handle_upload_blob, handle_upload_session_chunk,
-        put_upload_blob,
+        put_upload_blob, put_upload_session_blob,
     },
     content_discovery::{create_repository, get_tags_list, get_v2, list_repositories},
     database::{self, initdb, migrate_fresh},
@@ -65,12 +65,6 @@ struct App {
 
 #[tokio::main]
 async fn main() {
-    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(true)
-        .pretty()
-        .finish();
-    subscriber.with(tracing_subscriber::fmt::layer()).init();
     let _ = dotenvy::dotenv().ok();
     let args = App::parse();
     let home = args
@@ -79,10 +73,10 @@ async fn main() {
         .cloned()
         .map_or_else(
             || {
-                std::env::var("HARBOR_HOME").unwrap_or(
+                std::env::var("FLOUNDR_HOME").unwrap_or(
                     dirs::data_local_dir()
                         .expect("unable to get XDG_LOCAL_DIR")
-                        .join("harbor")
+                        .join("floundr")
                         .to_string_lossy()
                         .to_string(),
                 )
@@ -100,7 +94,7 @@ async fn main() {
     let password = args.password.clone();
     let pool = initdb(
         &std::path::Path::new(&home)
-            .join("harbor.db")
+            .join("floundr.db")
             .to_string_lossy(),
         email.clone(),
         password.clone(),
@@ -114,6 +108,12 @@ async fn main() {
         eprintln!("Invalid address: {host}:{port}");
         std::process::exit(1);
     });
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(true)
+        .pretty()
+        .finish();
+    subscriber.with(tracing_subscriber::fmt::layer()).init();
     info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -129,10 +129,14 @@ async fn main() {
         .route("/users/:email/token", post(generate_token))
         .route("/repositories", get(list_repositories))
         .route("/repositories/:name/:public", post(create_repository))
+        .route("/v2/:name/blobs/:digest", put(put_upload_blob))
         .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
         .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
-        .route("/v2/:name/blobs/uploads/:session_id", put(put_upload_blob))
+        .route(
+            "/v2/:name/blobs/uploads/:session_id",
+            put(put_upload_session_blob),
+        )
         .route(
             "/v2/:name/blobs/uploads/:session_id",
             patch(handle_upload_session_chunk),

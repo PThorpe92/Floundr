@@ -102,7 +102,7 @@ impl Default for App {
             .as_ref()
             .expect("config file not properly loaded")
             .clone();
-        info!("Using Harbor URL: {}", url);
+        info!("Using Floundr URL: {}", url);
         Self {
             url,
             config,

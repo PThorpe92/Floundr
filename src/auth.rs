@@ -75,15 +75,12 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, Response> {
     let headers = req.headers().clone();
-    let span = tracing::info_span!("auth_middleware");
-    span.record("headers", format!("{:?}", headers));
-    span.record("uri", req.uri().to_string());
     let mut resp_headers = HeaderMap::new();
-    let app_url = std::env::var("APP_URL").unwrap_or("http://127.0.0.1:8080".to_string());
+    let app_url = std::env::var("APP_URL").unwrap_or("http://127.0.0.1".to_string());
     resp_headers.insert(
         WWW_AUTHENTICATE,
         format!(
-            "Bearer realm=\"{}/v2/auth/token\",service=\"harbor\",scope=\"repository:*:*\"",
+            "Bearer realm=\"{}/v2/auth/token\",service=\"floundr\",scope=\"repository:*:*\"",
             app_url
         )
         .parse()
@@ -157,7 +154,7 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
     )
     .decode(token)
     .unwrap();
-    let decoded = String::from_utf8(decoded).unwrap();
+    let decoded = String::from_utf8(decoded).map_err(|e| e.to_string())?;
     let parts: Vec<&str> = decoded.split(":").collect();
     let user = parts[0];
     let password = parts.get(1).unwrap_or(&"");
@@ -165,7 +162,7 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
         .await
         .map_err(|e| e.to_string())?;
     let mut claims = Claims::default();
-    claims.set_sub(serde_json::to_string(&user_info).unwrap());
+    claims.set_sub(serde_json::to_string(&user_info).map_err(|e| e.to_string())?);
     Ok(claims)
 }
 

@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct User {
+pub struct User {
     id: String,
     email: String,
     #[serde(skip_serializing)]
@@ -32,7 +32,7 @@ impl User {
 fn check_auth(req: Request) -> bool {
     // here we ensure that we are dealing with the tui client
     let headers = req.headers().get("User-Agent");
-    if headers.is_some_and(|h| h.to_str().unwrap().contains("harbor-tui")) {
+    if headers.is_some_and(|h| h.to_str().unwrap().contains("floundr-tui")) {
         let auth = req.extensions().get::<Auth>();
         return auth.is_some() && auth.is_some_and(|a| a.is_valid());
     };
