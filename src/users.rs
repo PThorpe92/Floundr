@@ -1,35 +1,18 @@
+use crate::{
+    auth::Auth,
+    codes::{Code, ErrorResponse},
+    database::DbConn,
+};
 use axum::{
+    debug_handler,
     extract::{Path, Request},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use chrono::NaiveDateTime;
-
-use crate::{
-    auth::Auth,
-    codes::{Code, ErrorResponse},
-    database::DbConn,
-};
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub struct User {
-    id: String,
-    is_admin: bool,
-    email: String,
-    #[serde(skip_serializing)]
-    password: String,
-    #[serde(skip_serializing)]
-    created_at: NaiveDateTime,
-}
-impl User {
-    fn validate(&self) -> bool {
-        self.email.is_ascii()
-            && self.password.len() > 8
-            && self.password.chars().any(char::is_numeric)
-    }
-}
-
+use shared::User;
+use shared::{RepoScope, UserResponse};
 fn check_auth(req: &Request) -> bool {
     // here we ensure that we are dealing with the tui client
     let headers = req.headers().get("User-Agent");
@@ -48,7 +31,45 @@ pub async fn get_users(DbConn(mut conn): DbConn, req: Request) -> impl IntoRespo
         .fetch_all(&mut *conn)
         .await
         .expect("unable to fetch users");
-    (StatusCode::OK, Json(users)).into_response()
+    let repositories = sqlx::query!("SELECT * FROM repositories")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("unable to fetch repositories");
+    let mut user_resp = vec![];
+    for user in users.iter() {
+        let mut user_scopes = vec![];
+        for repo in repositories.iter() {
+            let scopes = match user.is_admin {
+                true => vec!["pull".to_string(), "push".to_string(), "delete".to_string()],
+                false => {
+                    let scopes = sqlx::query!("SELECT push, pull, del FROM repository_scopes WHERE user_id = ? AND repository_id = ?", user.id, repo.id)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .expect("unable to fetch permissions");
+                    let mut permissions = vec![];
+                    if scopes.push {
+                        permissions.push("push".to_string());
+                    }
+                    if scopes.pull {
+                        permissions.push("pull".to_string());
+                    }
+                    if scopes.del {
+                        permissions.push("delete".to_string());
+                    }
+                    permissions
+                }
+            };
+            user_scopes.push(RepoScope {
+                repo: repo.name.clone(),
+                scope: scopes,
+            });
+        }
+        user_resp.push(UserResponse {
+            user: user.clone(),
+            scopes: user_scopes,
+        });
+    }
+    (StatusCode::OK, Json(user_resp)).into_response()
 }
 
 pub async fn delete_user(
@@ -66,22 +87,6 @@ pub async fn delete_user(
     (StatusCode::NO_CONTENT, "").into_response()
 }
 
-pub async fn create_user(Json(user): Json<User>, DbConn(mut conn): DbConn) -> impl IntoResponse {
-    if !user.validate() {
-        return (StatusCode::BAD_REQUEST, "Invalid user").into_response();
-    }
-    let _ = sqlx::query!(
-        "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
-        user.id,
-        user.email,
-        user.password,
-    )
-    .execute(&mut *conn)
-    .await
-    .expect("unable to create user");
-    (StatusCode::CREATED, "").into_response()
-}
-
 pub async fn generate_token(
     Path(email): Path<String>,
     DbConn(mut conn): DbConn,
@@ -90,7 +95,7 @@ pub async fn generate_token(
     if !check_auth(&req) {
         return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
     }
-    let token = crate::database::generate_secret(&mut conn, Some(&email))
+    let token = crate::database::generate_secret(&mut conn, None, &email)
         .await
         .unwrap();
     (
@@ -98,24 +103,4 @@ pub async fn generate_token(
         serde_json::to_string(&crate::auth::TokenResponse::new(&token)).unwrap(),
     )
         .into_response()
-}
-
-#[derive(serde::Serialize, Debug)]
-struct Client {
-    #[serde(skip)]
-    id: i64,
-    client_id: String,
-    user_id: String,
-    secret: String,
-    created_at: NaiveDateTime,
-}
-pub async fn list_keys(DbConn(mut conn): DbConn, req: Request) -> impl IntoResponse {
-    if !check_auth(&req) {
-        return ErrorResponse::from_code(&Code::Unauthorized, "Unauthorized").into_response();
-    }
-    let keys = sqlx::query_as!(Client, "SELECT * FROM clients")
-        .fetch_all(&mut *conn)
-        .await
-        .expect("unable to fetch keys");
-    (StatusCode::OK, serde_json::to_string(&keys).unwrap()).into_response()
 }

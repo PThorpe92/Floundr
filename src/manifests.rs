@@ -1,8 +1,5 @@
 use crate::{
-    codes::ErrorResponse,
-    database::DbConn,
-    storage_driver::Backend,
-    util::{strip_sha_header, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE},
+    codes::ErrorResponse, database::DbConn, storage_driver::Backend, util::strip_sha_header,
 };
 use axum::{
     extract::{Path, Request},
@@ -11,81 +8,9 @@ use axum::{
     Extension,
 };
 use http::header::CONTENT_TYPE;
+use shared::{ImageManifest, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE};
 use std::sync::Arc;
 use tracing::{error, info};
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageManifest {
-    pub schema_version: i32,
-    pub media_type: Option<String>,
-    pub config: Option<Descriptor>,
-    pub layers: Vec<Descriptor>,
-    pub annotations: Option<HashMap<String, String>>,
-}
-impl Default for ImageManifest {
-    fn default() -> Self {
-        ImageManifest {
-            schema_version: 2,
-            media_type: Some(MANIFEST_CONTENT_TYPE.to_string()),
-            config: Some(Descriptor {
-                media_type: Some("application/vnd.oci.image.config.v2+json".to_string()),
-                size: 0,
-                digest: "".to_string(),
-            }),
-            layers: Vec::new(),
-            annotations: None,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Descriptor {
-    pub media_type: Option<String>,
-    pub size: i32,
-    pub digest: String,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageConfig {
-    pub architecture: String,
-    pub os: String,
-    pub created: Option<String>,
-    pub author: Option<String>,
-    pub config: Config,
-    pub rootfs: RootFS,
-    pub history: Vec<History>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Config {
-    pub env: Option<Vec<String>>,
-    pub entrypoint: Option<Vec<String>>,
-    pub cmd: Option<Vec<String>>,
-    pub labels: Option<HashMap<String, String>>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RootFS {
-    pub type_: String,
-    pub diff_ids: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct History {
-    pub created: Option<String>,
-    pub created_by: Option<String>,
-    pub author: Option<String>,
-    pub comment: Option<String>,
-}
 
 /// PUT /v2/:name/manifests/:reference
 pub async fn push_manifest(

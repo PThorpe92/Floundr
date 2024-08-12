@@ -22,6 +22,7 @@ use http::{
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use shared::{AuthClient, RegisterUserRequest};
 use sqlx::{query, SqliteConnection};
 use tracing::info;
 
@@ -182,33 +183,29 @@ fn get_requested_scope(req: &Request) -> String {
 }
 
 async fn check_headers(headers: &HeaderMap, conn: &mut SqliteConnection) -> Result<Auth, String> {
-    if let Some(auth_header) = headers
+    let auth_header = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
-    {
-        match auth_header {
-            header if header.to_lowercase().contains("bearer") => {
-                let token = header
-                    .split("Bearer ")
-                    .last()
-                    .unwrap_or(header.split("bearer ").last().unwrap());
-                return validate_bearer(token, conn).await;
-            }
-            header if header.contains("Basic") => {
-                let token = header
-                    .split("Basic ")
-                    .last()
-                    .unwrap_or(header.split("basic ").last().unwrap());
-                if let Ok(claims) = validate_basic_auth(token, conn).await {
-                    return Ok(Auth {
-                        claims: Some(claims),
-                    });
-                }
-            }
-            _ => {
-                return Err(String::from("invalid auth header"));
-            }
+        .ok_or_else(|| String::from("Missing authorization header"))?;
+
+    if auth_header.to_lowercase().starts_with("bearer ") {
+        let token = auth_header
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| String::from("Invalid bearer token format"))?;
+        return validate_bearer(token, conn).await;
+    }
+
+    if auth_header.to_lowercase().starts_with("basic ") {
+        let token = auth_header
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| String::from("Invalid basic auth format"))?;
+        if let Ok(claims) = validate_basic_auth(token, conn).await {
+            return Ok(Auth {
+                claims: Some(claims),
+            });
         }
     }
     Err(String::from("invalid auth header"))
@@ -287,23 +284,23 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
     Ok(claims)
 }
 
+#[tracing::instrument(skip(conn))]
 async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Auth, String> {
     // check if it's an assigned API key (uuid v4)
     // these carry all scopes for each repository
-    if token.len() == 36 {
-        if let Ok(row) = query!("SELECT client_id FROM clients WHERE secret = ?", token)
-            .fetch_one(&mut *conn)
-            .await
-        {
-            let scopes = get_admin_scopes(conn).await;
-            let mut claims = Claims::default();
-            claims.set_sub(row.client_id);
-            claims.set_admin(true);
-            claims.scopes = scopes;
-            return Ok(Auth {
-                claims: Some(claims),
-            });
-        }
+    info!("validating bearer token: {}", token);
+    if let Ok(row) = query!("SELECT client_id FROM clients WHERE secret = ?", token)
+        .fetch_one(&mut *conn)
+        .await
+    {
+        let scopes = get_admin_scopes(conn).await;
+        let mut claims = Claims::default();
+        claims.set_sub(row.client_id);
+        claims.set_admin(true);
+        claims.scopes = scopes;
+        return Ok(Auth {
+            claims: Some(claims),
+        });
     }
     let secret = std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
     let claims = decode::<Claims>(
@@ -426,11 +423,17 @@ pub async fn login_user(
     }
 }
 
-#[derive(Deserialize, Debug)]
-pub struct RegisterUserRequest {
-    email: String,
-    password: String,
-    confirm_password: String,
+pub async fn get_auth_clients(DbConn(mut conn): DbConn) -> impl IntoResponse {
+    if let Ok(clients) = sqlx::query_as!(
+        AuthClient,
+        "SELECT clients.id, client_id, secret, clients.created_at, u.email FROM clients JOIN users u ON user_id = u.id"
+    )
+    .fetch_all(&mut *conn)
+    .await
+    {
+        return (StatusCode::OK, serde_json::to_string(&clients).unwrap()).into_response();
+    }
+    (StatusCode::NOT_FOUND, "no auth clients were found").into_response()
 }
 
 pub async fn register_user(
@@ -442,20 +445,15 @@ pub async fn register_user(
             let hashed = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST).unwrap();
             let user_id = uuid::Uuid::new_v4().to_string();
             let _ = sqlx::query!(
-                "INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
+                "INSERT INTO users (id, email, password, is_admin) VALUES (?, ?, ?, ?)",
                 user_id,
                 req.email,
-                hashed
+                hashed,
+                req.is_admin,
             )
             .execute(&mut *conn)
             .await;
-            let claims = Claims::new(&user_id).to_string();
-            let mut header_map = HeaderMap::new();
-            header_map.insert(
-                SET_COOKIE,
-                format!("Authorization: bearer {}", claims).parse().unwrap(),
-            );
-            (StatusCode::OK, header_map).into_response()
+            (StatusCode::CREATED).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }

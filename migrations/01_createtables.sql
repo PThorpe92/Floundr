@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS repository_scopes (
 
 CREATE TABLE IF NOT EXISTS clients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     secret TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -109,6 +109,33 @@ CREATE INDEX IF NOT EXISTS idx_manifest_layers_digest ON manifest_layers (digest
 CREATE INDEX IF NOT EXISTS idx_uploads_uuid ON uploads (uuid);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
 CREATE INDEX IF NOT EXISTS idx_repository_scopes_user_id ON repository_scopes (user_id);
+CREATE INDEX IF NOT EXISTS idx_clients_secret ON clients (secret);
+
+CREATE TRIGGER IF NOT EXISTS add_scopes_on_new_user
+AFTER INSERT ON users
+BEGIN
+    INSERT INTO repository_scopes (user_id, repository_id, push, pull, del)
+    SELECT
+        NEW.id,
+        repositories.id,
+        CASE WHEN NEW.is_admin THEN TRUE ELSE FALSE END,
+        CASE WHEN repositories.is_public THEN TRUE ELSE FALSE END,
+        CASE WHEN NEW.is_admin THEN TRUE ELSE FALSE END
+    FROM repositories;
+END;
+
+CREATE TRIGGER IF NOT EXISTS add_scopes_on_new_repository
+AFTER INSERT ON repositories
+BEGIN
+    INSERT INTO repository_scopes (user_id, repository_id, push, pull, del)
+    SELECT
+        users.id,
+        NEW.id,
+        CASE WHEN users.is_admin THEN TRUE ELSE FALSE END,
+        CASE WHEN repositories.is_public THEN TRUE ELSE FALSE END,
+        CASE WHEN users.is_admin THEN TRUE ELSE FALSE END
+    FROM users JOIN repositories on 1=1;
+END;
 
 INSERT INTO repositories (name, is_public)
 SELECT 'default', 1

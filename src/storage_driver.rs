@@ -89,7 +89,7 @@ pub enum Backend {
     Local(LocalStorageDriver),
     // S3(S3StorageDriver),
 }
-// all this just because we can't use trait objects async
+// all this just because we can't use trait objects or impl trait async 😥
 macro_rules! backend_methods {
     ($enum_name:ident, $($variant:ident),+) => {
         impl $enum_name {
@@ -224,7 +224,12 @@ macro_rules! backend_methods {
             &self, pool: &mut SqliteConnection, name: &str, session_id: &str) -> Result<String, StorageError> {
                 match self {
                     $(Self::$variant(driver) => driver.combine_chunks(pool, name, session_id).await,)+
+               }
             }
+            pub async fn delete_repository(&self, name: &str, pool: &mut SqliteConnection) -> Result<(), StorageError> {
+                match self {
+                    $(Self::$variant(driver) => driver.delete_repository(name, pool).await,)+
+                }
            }
         }
     };

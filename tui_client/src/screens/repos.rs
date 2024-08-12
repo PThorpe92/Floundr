@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Mode, GLOBAL_REPO_LIST},
+    app::{get_items, App, Mode, GLOBAL_REPO_LIST},
     screens::InputType,
 };
 use ratatui::{
@@ -13,14 +13,14 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Table},
 };
 
-use super::users::render_header;
+use super::{manifests::render_manifest_screen, users::render_header};
 
 pub fn repository_screen(frame: &mut Frame, app: &mut App) {
     render_header(frame, "<-   Home    |    Users   ->");
-    let size = frame.size();
+    let size = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .margin(5)
+        .margin(4)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
         .spacing(1)
         .split(size);
@@ -81,13 +81,25 @@ pub fn repository_screen(frame: &mut Frame, app: &mut App) {
             render_repo_details(frame, chunks.to_vec(), repo);
         }
     }
+    if let Some(idx) = app.state.selected() {
+        let repositories = GLOBAL_REPO_LIST.read().unwrap();
+        let repo = repositories.repositories.get(idx).unwrap();
+        match repo.tags.len() {
+            0 => {}
+            n => {
+                render_manifest_screen(
+                    frame,
+                    repo.tags
+                        .get(if app.cursor >= n { app.cursor } else { n })
+                        .unwrap(),
+                    &chunks[1],
+                );
+            }
+        }
+    }
 }
 
-fn render_repo_details(
-    frame: &mut Frame,
-    chunks: Vec<ratatui::layout::Rect>,
-    repo: &crate::app::Repo,
-) {
+fn render_repo_details(frame: &mut Frame, chunks: Vec<ratatui::layout::Rect>, repo: &shared::Repo) {
     let details_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(8), Constraint::Min(0)].as_ref())
@@ -131,7 +143,7 @@ fn render_repo_details(
     let tags_list: Vec<ListItem> = repo
         .tags
         .iter()
-        .map(|tag| ListItem::new(tag.clone()))
+        .map(|tag| ListItem::new(format!("Tag: {}", tag.clone())))
         .collect();
     let tags = List::new(tags_list).block(Block::default().title("Tags").borders(Borders::ALL));
 
@@ -144,7 +156,7 @@ fn render_repo_details(
 
 pub fn home_screen(frame: &mut Frame, app: &mut App) {
     render_header(frame, "|   Repositories  ->");
-    let size = frame.size();
+    let size = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
@@ -157,7 +169,7 @@ pub fn home_screen(frame: &mut Frame, app: &mut App) {
             .as_ref(),
         )
         .split(size);
-    let items = app.get_items();
+    let items = get_items(app.current_screen, app.state.selected());
     let selected_style = Style::default()
         .bg(ratatui::style::Color::Black)
         .fg(ratatui::style::Color::Yellow);
@@ -206,15 +218,14 @@ pub fn home_screen(frame: &mut Frame, app: &mut App) {
 }
 #[rustfmt::skip]
 pub static ASCII_ART: &str = 
-r#" 
-
+r#"
   █████▒██▓     ▒█████   █    ██  ███▄    █ ▓█████▄  ██▀███  
 ▓██   ▒▓██▒    ▒██▒  ██▒ ██  ▓██▒ ██ ▀█   █ ▒██▀ ██▌▓██ ▒ ██▒
 ▒████ ░▒██░    ▒██░  ██▒▓██  ▒██░▓██  ▀█ ██▒░██   █▌▓██ ░▄█ ▒
-░▓█▒  ░▒██░    ▒██   ██░▓▓█  ░██░▓██▒  ▐▌██▒░▓█▄   ▌▒██▀▀█▄  
-░▒█░   ░██████▒░ ████▓▒░▒▒█████▓ ▒██░   ▓██░░▒████▓ ░██▓ ▒██▒
- ▒ ░   ░ ▒░▓  ░░ ▒░▒░▒░ ░▒▓▒ ▒ ▒ ░ ▒░   ▒ ▒  ▒▒▓  ▒ ░ ▒▓ ░▒▓░
- ░     ░ ░ ▒  ░  ░ ▒ ▒░ ░░▒░ ░ ░ ░ ░░   ░ ▒░ ░ ▒  ▒   ░▒ ░ ▒░
- ░ ░     ░ ░   ░ ░ ░ ▒   ░░░ ░ ░    ░   ░ ░  ░ ░  ░   ░░   ░ 
-           ░  ░    ░ ░     ░              ░    ░       ░     
-                                             ░"#;
+░▓█▒  ░▒██░    ▒██   ██░▓▓█  ░██░▓██▒. ▐▌██▒░▓█▄  █▌▒██▀▀█▄  
+░▒█░   ░██████▒░ ████▓▒░▒▒█████▓ ▒██░  *▓██░░▒████▓ ░██▓ ▒██▒
+ ▒ ░   ░ ▒░▓  ░░ ▒░▒░▒░ ░▒▓▒ ▒ ▒ ░ ▒░ . ▒ ▒  ▒▒▓  ▒ ░ ▒▓ ░▒▓░
+ ░   * ░ ░ ▒  ░  ░ ▒ ▒░ ░░▒░ ░ ░ ░ ░░   ░ ▒░ ░ ▒  ▒ . ░▒ ░ ▒░
+*░ ░     ░ ░   ░ ░ ░ ▒ * ░░░ ░ ░*   ░  .░ ░  ░ ░* ░   ░░ . ░ 
+.     *    ░. ░ *  ░ ░    *░.             ░    ░ .   * ░   *.
+  .      .    .     .  .           .         ░"#;

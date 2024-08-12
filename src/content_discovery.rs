@@ -216,3 +216,12 @@ pub async fn list_repositories(
     .unwrap();
     (StatusCode::OK, response).into_response()
 }
+
+pub async fn delete_repository(
+    Path(name): Path<String>,
+    DbConn(mut conn): DbConn,
+    Extension(storage): Extension<Arc<Backend>>,
+) -> impl IntoResponse {
+    let _ = storage.delete_repository(&name, &mut conn).await;
+    (StatusCode::OK, "repository deleted").into_response()
+}

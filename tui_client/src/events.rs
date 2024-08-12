@@ -32,7 +32,6 @@ impl AppEventHandler {
                     let timeout = tick_rate
                         .checked_sub(last_tick.elapsed())
                         .unwrap_or(tick_rate);
-
                     if event::poll(timeout).expect("no events available") {
                         match event::read().expect("unable to read event") {
                             Event::Key(e) => sender.send(AppEvent::Key(e)),

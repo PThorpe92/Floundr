@@ -84,14 +84,16 @@ pub async fn seed_default_client(pool: &mut SqliteConnection) -> Result<(), sqlx
 
 pub async fn generate_secret(
     pool: &mut SqliteConnection,
-    client_id: Option<&str>,
+    client_id: Option<String>,
+    email: &str,
 ) -> Result<String, sqlx::Error> {
     let secret = uuid::Uuid::new_v4().to_string();
-    let id = client_id.unwrap_or("floundr_tui");
+    let id = client_id.unwrap_or(uuid::Uuid::new_v4().to_string());
     query!(
-        "INSERT INTO clients (client_id, secret) VALUES (?, ?)",
+        "INSERT INTO clients (client_id, secret, user_id) VALUES (?, ?, (SELECT id from users where email = ?))",
         id,
-        secret
+        secret,
+        email
     )
     .execute(&mut *pool)
     .await?;

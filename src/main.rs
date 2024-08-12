@@ -6,13 +6,16 @@ use axum::{
 use clap::Parser;
 use floundr::{
     auth::{
-        auth_middleware, auth_token_get, check_scope_middleware, login_user, register_user, Auth,
+        auth_middleware, auth_token_get, check_scope_middleware, get_auth_clients, login_user,
+        register_user, Auth,
     },
     blobs::{
         check_blob, delete_blob, get_blob, handle_upload_blob, handle_upload_session_chunk,
         put_upload_blob, put_upload_session_blob,
     },
-    content_discovery::{create_repository, get_tags_list, get_v2, list_repositories},
+    content_discovery::{
+        create_repository, delete_repository, get_tags_list, get_v2, list_repositories,
+    },
     database::{self, initdb, migrate_fresh},
     manifests::{delete_manifest, get_manifest, push_manifest},
     storage_driver::{Backend, DriverType},
@@ -27,9 +30,9 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "oci_rs")]
+#[command(name = "floundr")]
 #[command(version = "0.0.1")]
-#[command(about = "OCI compliant container registry server", long_about = None)]
+#[command(about = "OCI container registry server", long_about = None)]
 struct App {
     #[arg(long, short = 'p', default_value = "8080")]
     port: Option<usize>,
@@ -60,7 +63,8 @@ struct App {
     debug: bool,
     #[arg(
         long,
-        help = "generate new registry secret and write to file",
+        help = "generate new registry client secret for a user and write to file",
+        requires = "email",
         default_missing_value = "secret.txt"
     )]
     secret: Option<String>,
@@ -124,57 +128,33 @@ async fn main() {
         .route("/v2/", get(get_v2))
         .route("/v2/auth/login", post(login_user))
         .route("/v2/auth/token", get(auth_token_get))
-        .route("/users", get(get_users))
-        .route(
-            "/v2/auth/register",
-            post(register_user).layer(from_fn(check_scope_middleware)),
-        )
+        .route("/v2/auth/register", post(register_user))
+        .route("/v2/auth/clients", get(get_auth_clients))
         .route("/repositories", get(list_repositories))
-        .route(
-            "/repositories/:name/:public",
-            post(create_repository).layer(from_fn(check_scope_middleware)),
-        )
-        .route(
-            "/users/:email",
-            delete(delete_user).layer(from_fn(check_scope_middleware)),
-        )
-        .route("/users/:email/token", post(generate_token))
-        .route(
-            "/v2/:name/blobs/:digest",
-            put(put_upload_blob).layer(from_fn(check_scope_middleware)),
-        )
-        .route(
-            "/v2/:name/blobs/:digest",
-            get(get_blob).layer(from_fn(check_scope_middleware)),
-        )
+        .route("/repositories/:name/:public", post(create_repository))
+        .route("/repositories/:name", delete(delete_repository))
+        .route("/users", get(get_users))
+        .route("/users/:email", delete(delete_user))
+        .route("/users/:email/tokens", post(generate_token))
+        .route("/v2/:name/blobs/:digest", put(put_upload_blob))
+        .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
+        .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
         .route(
-            "/v2/:name/blobs/uploads/",
-            post(handle_upload_blob).layer(from_fn(check_scope_middleware)),
+            "/v2/:name/blobs/uploads/:session_id",
+            put(put_upload_session_blob),
         )
         .route(
             "/v2/:name/blobs/uploads/:session_id",
-            put(put_upload_session_blob).layer(from_fn(check_scope_middleware)),
-        )
-        .route(
-            "/v2/:name/blobs/uploads/:session_id",
-            patch(handle_upload_session_chunk).layer(from_fn(check_scope_middleware)),
+            patch(handle_upload_session_chunk),
         )
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
-        .route(
-            "/v2/:name/manifests/:reference",
-            get(get_manifest).layer(from_fn(check_scope_middleware)),
-        )
+        .route("/v2/:name/manifests/:reference", get(get_manifest))
         .route("/v2/:name/manifests/:reference", head(get_manifest))
-        .route(
-            "/v2/:name/manifests/:reference",
-            put(push_manifest).layer(from_fn(check_scope_middleware)),
-        )
-        .route(
-            "/v2/:name/manifests/:reference",
-            delete(delete_manifest).layer(from_fn(check_scope_middleware)),
-        )
+        .route("/v2/:name/manifests/:reference", put(push_manifest))
+        .route("/v2/:name/manifests/:reference", delete(delete_manifest))
+        .layer(from_fn(check_scope_middleware))
         .layer(axum::middleware::from_fn_with_state(
             pool.clone(),
             auth_middleware,
@@ -216,7 +196,12 @@ async fn handle_args(args: &App, conn: &mut SqliteConnection, storage: &Backend)
         let _ = database::seed_default_user(conn, email, password).await;
     }
     if let Some(ref file) = args.secret {
-        let secret = database::generate_secret(conn, None)
+        if args.email.is_none() {
+            eprintln!("email is required to generate secret");
+            std::process::exit(1);
+        }
+        let email = args.email.as_ref().unwrap();
+        let secret = database::generate_secret(conn, None, email)
             .await
             .expect("unable to generate secret");
         tokio::fs::write(file, secret).await.unwrap();

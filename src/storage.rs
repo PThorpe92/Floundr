@@ -1,5 +1,4 @@
 use crate::{
-    manifests::ImageManifest,
     storage_driver::StorageError,
     util::{calculate_digest, validate_digest},
 };
@@ -10,6 +9,7 @@ use axum::http::StatusCode;
 use axum::{async_trait, BoxError};
 use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt};
+use shared::ImageManifest;
 use sqlx::{query, SqliteConnection};
 use std::io::{self};
 use std::path::{Path, PathBuf};
@@ -71,6 +71,38 @@ impl LocalStorageDriver {
         Self {
             base_path: PathBuf::from(base_path),
         }
+    }
+
+    pub async fn delete_repository(
+        &self,
+        name: &str,
+        conn: &mut SqliteConnection,
+    ) -> Result<(), StorageError> {
+        let rows = query!("SELECT file_path FROM blobs JOIN repositories ON blobs.repository_id = repositories.id WHERE repositories.name = ?", name)
+            .fetch_all(&mut *conn)
+            .await?;
+        for row in rows.iter() {
+            tokio::fs::remove_file(&row.file_path).await?;
+        }
+        query!(
+            "DELETE FROM blobs WHERE repository_id = (SELECT id from repositories WHERE name = ?)",
+            name
+        )
+        .execute(&mut *conn)
+        .await?;
+        let rows = query!("SELECT file_path FROM manifests JOIN repositories ON manifests.repository_id = repositories.id WHERE repositories.name = ?", name)
+            .fetch_all(&mut *conn)
+            .await?;
+        for row in rows.iter() {
+            tokio::fs::remove_file(&row.file_path).await?;
+        }
+        query!("DELETE FROM manifests WHERE repository_id = (SELECT id from repositories WHERE name = ?)", name)
+            .execute(&mut *conn)
+            .await?;
+        query!("DELETE FROM repositories WHERE name = ?", name)
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
     }
 
     pub async fn get_dir_size(&self, path: impl Into<PathBuf>) -> u64 {

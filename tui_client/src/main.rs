@@ -5,10 +5,11 @@ use reqwest::{
     Client,
 };
 use std::io::{self};
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tui_client::{
     app::{App, Tui, CLIENT, HEADERS},
     events::AppEventHandler,
+    requests::{get_all_users, get_manifests, get_repositories},
 };
 
 #[tokio::main]
@@ -51,10 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder().default_headers(headers).build()?;
     let _ = CLIENT.set(client);
     let mut tui = Tui::new(terminal, AppEventHandler::new(100), app);
+    tui.fetch_data().await?;
     tui.init()?;
-    if tui.get_repositories().await.is_err() {
-        println!("Unable to fetch repositories, please set the FLOUNDR_URL env var, or the url in the config file to connect to the registry");
-    }
     while tui.app.running {
         let _ = tui.draw();
         let _ = tui.handle_events();

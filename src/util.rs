@@ -4,9 +4,6 @@ use base64::{alphabet::URL_SAFE, Engine};
 use http::{header::CONTENT_RANGE, HeaderMap};
 use sha2::{Digest, Sha256};
 
-pub static OCI_CONTENT_HEADER: &str = "application/vnd.oci.image.index.v1+json";
-pub static DOCKER_DIGEST: &str = "Docker-Content-Digest";
-pub static MANIFEST_CONTENT_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 
 pub fn calculate_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
