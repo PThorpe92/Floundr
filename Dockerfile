@@ -12,9 +12,8 @@ RUN cargo build --release
 FROM scratch
 WORKDIR /
 ENV DATABASE_URL=sqlite:/db.sqlite3
-COPY --from=builder /app/target/release/floundr /bin/floundr
+COPY --from=builder /app/target/release/floundr .
 COPY --from=builder /app/database/db.sqlite3 /db.sqlite3
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 EXPOSE 8080
-RUN ls -la
-ENTRYPOINT ["floundr --port 8080 --new-repo test_repo --public false"]
+ENTRYPOINT ["./floundr", "--port", "8080", "--new-repo", "test_repo", "--public", "false"]

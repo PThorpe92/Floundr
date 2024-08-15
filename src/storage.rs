@@ -1,6 +1,6 @@
 use crate::{
     storage_driver::StorageError,
-    util::{calculate_digest, validate_digest},
+    util::{calculate_digest, is_digest, validate_digest},
 };
 use axum::body::BodyDataStream;
 use axum::extract::{FromRef, FromRequestParts};
@@ -420,36 +420,33 @@ impl LocalStorageDriver {
         name: &str,
         reference: &str,
     ) -> Result<(), StorageError> {
-        // reference can be either a tag OR a digest
-        // check if its a tag
-        //check if its a digest
-        if let Ok(found) = sqlx::query!(
-            "SELECT m.file_path, m.id FROM manifests m 
-         JOIN repositories r ON m.repository_id = r.id 
-         WHERE m.digest = ? AND r.name = ?",
-            reference,
-            name
-        )
-        .fetch_one(&mut *pool)
-        .await
-        {
-            info!("found manifest with file_path: {}", found.file_path);
-            tokio::fs::remove_file(found.file_path).await?;
-            // Delete related tags and the manifest in one query
-            sqlx::query!(
-                "DELETE FROM tags WHERE manifest_id = ?; DELETE FROM manifests WHERE id = ?",
-                found.id,
-                found.id
+        if is_digest(reference) {
+            if let Ok(found) = sqlx::query!(
+                "SELECT m.file_path, m.id FROM manifests m
+            JOIN repositories r ON m.repository_id = r.id
+            WHERE m.digest = ? AND r.name = ?",
+                reference,
+                name
             )
-            .execute(&mut *pool)
-            .await?;
-            return Ok(());
+            .fetch_one(&mut *pool)
+            .await
+            {
+                // Delete related tags and the manifest in one query
+                sqlx::query!(
+                    "DELETE FROM tags WHERE manifest_id = ?; DELETE FROM manifests WHERE id = ?",
+                    found.id,
+                    found.id
+                )
+                .execute(&mut *pool)
+                .await?;
+                tokio::fs::remove_file(found.file_path).await?;
+                return Ok(());
+            }
         }
-
         // If it's not a manifest digest, check if it's a tag
         if let Ok(row) = sqlx::query!(
-            "SELECT m.file_path, m.id FROM manifests m 
-         JOIN tags t ON t.manifest_id = m.id 
+            "SELECT m.file_path, m.id FROM manifests m
+         JOIN tags t ON t.manifest_id = m.id
          JOIN repositories r ON t.repository_id = r.id
          WHERE t.tag = ? AND r.name = ?",
             reference,

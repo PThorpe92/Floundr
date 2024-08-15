@@ -8,52 +8,53 @@ services:
       - ./config/nginx.conf:/etc/nginx/conf.d/default.conf
       - logs:/var/log/nginx/
       - logs:/var/cache/nginx/client_temp/
-    network_mode: host
+    network_mode: bridge
     restart: on-failure
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  # floundr:
-  #   build:
-  #     dockerfile: Dockerfile
-  #     context: .
-  #   ports:
-  #     - 8080:8080
-  #   environment:
-  #     - PORT=8080
-  #     - HOST=127.0.0.1
-  #     - LOG_LEVEL=trace
-  #     - APP_URL=http://floundr
-  #     - DB_PATH=/floundr/db.sqlite3
-  #     - OCI_HOME=/floundr
-  #     - JWT_SECRET_KEY=MjAwOTE1ZTAzNjM0ZDI2M2VhMDdmNDllM2JlYTBmZTg4NTQzNTU5ZjU3OWQwOGVmMDg4MDM2MGNkZjVhZWU4OCAgLQo=
-  #   volumes:
-  #     - ./logs:/logs
-  #   network_mode: host
-  #   restart: on-failure
-  #   entrypoint: ["floundr", "--new-repo", "test_repo", "--public", "false"]
-  #
-  # compliance_testing:
-  #   build:
-  #     dockerfile: config/Dockerfile
-  #     context: .
-  #   command: ./conformance.test
-  #   environment:
-  #     OCI_ROOT_URL: http://floundr
-  #     OCI_NAMESPACE: test_repo
-  #     OCI_USERNAME: floundr_admin
-  #     OCI_PASSWORD: admin
-  #     OCI_TEST_PULL: 1
-  #     OCI_TEST_PUSH: 1
-  #     OCI_TEST_CONTENT_DISCOVERY: 1
-  #     OCI_TEST_CONTENT_MANAGEMENT: 1
-  #     OCI_HIDE_SKIPPED_WORKFLOWS: 0
-  #     OCI_DEBUG: 1
-  #     OCI_DELETE_MANIFEST_BEFORE_BLOBS: 0
-  #   network_mode: host
-  #   restart: on-failure
-  #   depends_on:
-  #     - floundr
+  floundr:
+    build:
+      dockerfile: Dockerfile
+      context: .
+    ports:
+      - 8080:8080
+    environment:
+      - PORT=8080
+      - HOST=127.0.0.1
+      - LOG_LEVEL=trace
+      - APP_URL=http://floundr
+      - DB_PATH=/floundr/db.sqlite3
+      - OCI_HOME=/floundr
+      - JWT_SECRET_KEY=MjAwOTE1ZTAzNjM0ZDI2M2VhMDdmNDllM2JlYTBmZTg4NTQzNTU5ZjU3OWQwOGVmMDg4MDM2MGNkZjVhZWU4OCAgLQo=
+    volumes:
+      - ./logs:/logs
+    network_mode: bridge
+    restart: on-failure
+
+  compliance_testing:
+    build:
+      dockerfile: config/Dockerfile
+      context: .
+    command: ./conformance.test
+    environment:
+      OCI_ROOT_URL: http://rev_proxy:80
+      OCI_NAMESPACE: test_repo
+      OCI_USERNAME: floundr_admin
+      OCI_PASSWORD: admin
+      OCI_TEST_PULL: 1
+      OCI_TEST_PUSH: 1
+      OCI_TEST_CONTENT_DISCOVERY: 1
+      OCI_TEST_CONTENT_MANAGEMENT: 1
+      OCI_HIDE_SKIPPED_WORKFLOWS: 0
+      OCI_DEBUG: 1
+      OCI_DELETE_MANIFEST_BEFORE_BLOBS: 0
+    restart: on-failure
+    network_mode: bridge
+    depends_on:
+      - rev_proxy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   logs:

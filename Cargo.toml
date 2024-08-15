@@ -9,10 +9,10 @@ members = [".", "tui_client", "src/shared"]
 [dependencies]
 shared = { path = "src/shared" }
 tokio = { version = "1.39.2", features = ["full"] }
-serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.121"
+serde = { version = "1.0.207", features = ["derive"] }
+serde_json = "1.0.124"
 http-body-util = "0.1.2"
-bytes = "1.6.1"
+bytes = "1.7.1"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["ansi"] }
 axum = { version = "0.7.5", features = [
@@ -33,12 +33,12 @@ sqlx = { version = "0.8.0", features = [
   'uuid',
 ] }
 uuid = { version = "1.10.0", features = ["v4"] }
-clap = { version = "4.5.11", features = ["derive"] }
+clap = { version = "4.5.15", features = ["derive"] }
 dirs = "5.0.1"
 dotenvy = "0.15.7"
 sha2 = "0.10.8"
-regex = "1.10.5"
-tower = "0.4.13"
+regex = "1.10.6"
+tower = "0.5.0"
 tower-http = { version = "0.5.2", features = ["trace"] }
 http = "1.1.0"
 tokio-util = "0.7.11"

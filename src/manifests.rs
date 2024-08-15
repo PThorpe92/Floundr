@@ -8,7 +8,7 @@ use axum::{
     Extension,
 };
 use http::header::CONTENT_TYPE;
-use shared::{ImageManifest, DOCKER_DIGEST, MANIFEST_CONTENT_TYPE};
+use shared::{DOCKER_DIGEST, MANIFEST_CONTENT_TYPE};
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -41,10 +41,7 @@ pub async fn push_manifest(
                     .parse()
                     .unwrap(),
             );
-            headers.insert(
-                "Docker-Content-Digest",
-                format!("sha256:{}", digest).parse().unwrap(),
-            );
+            headers.insert(DOCKER_DIGEST, format!("sha256:{}", digest).parse().unwrap());
             (StatusCode::CREATED, headers).into_response()
         }
         Err(err) => {
@@ -80,7 +77,7 @@ pub async fn get_manifest(
        let file_path = record.file_path;
         match blob_storage.read_manifest(&file_path).await {
             Ok(data) => {
-            headers.insert(DOCKER_DIGEST,  digest.parse().unwrap());
+            headers.insert(DOCKER_DIGEST,  format!("sha256:{}", digest).parse().unwrap());
             headers.insert(CONTENT_TYPE, MANIFEST_CONTENT_TYPE.parse().unwrap());
                     match *req.method() {
                         http::Method::HEAD => { return (StatusCode::OK, headers).into_response(); }
@@ -134,7 +131,6 @@ pub async fn delete_manifest(
     Extension(storage): Extension<Arc<Backend>>,
     DbConn(mut conn): DbConn,
 ) -> impl IntoResponse {
-    let reference = strip_sha_header(&reference);
     match storage.delete_manifest(&mut conn, &name, &reference).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,

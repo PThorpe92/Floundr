@@ -4,7 +4,6 @@ use base64::{alphabet::URL_SAFE, Engine};
 use http::{header::CONTENT_RANGE, HeaderMap};
 use sha2::{Digest, Sha256};
 
-
 pub fn calculate_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -37,6 +36,10 @@ pub fn strip_sha_header(digest: &str) -> String {
     } else {
         digest.to_string()
     }
+}
+
+pub fn is_digest(digest: &str) -> bool {
+    digest.starts_with("sha256:") || digest.len() >= 64
 }
 
 pub fn base64_decode(data: &str) -> Result<String, String> {

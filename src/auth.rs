@@ -16,10 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use http::{
-    header::{SET_COOKIE, WWW_AUTHENTICATE},
-    HeaderMap,
-};
+use http::{header::WWW_AUTHENTICATE, HeaderMap};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use shared::{AuthClient, RegisterUserRequest};
@@ -95,6 +92,13 @@ pub struct UserInfo {
     pub is_admin: bool,
 }
 
+/// Flow: The auth middleware checks the headers for each request,
+/// it validates the user or key and passes the auth Claims to
+/// the next layer. When the token endpoint is hit, the claims
+/// are validated against the scope requested in the query string.
+/// and if the claims has the required scope, the request is approved
+/// and the JWT is exchanged, having only the required scope, otherwise
+/// the request is denied.
 #[tracing::instrument(skip(conn))]
 pub async fn auth_middleware(
     DbConn(mut conn): DbConn,
@@ -102,19 +106,11 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, Response> {
     let headers = req.headers().clone();
-    let mut resp_headers = HeaderMap::new();
-    let requested_scope = get_requested_scope(&req);
-    let app_url =
-        std::env::var("APP_URL").map_err(|_| (StatusCode::UNAUTHORIZED).into_response())?;
-    resp_headers.insert(
-        WWW_AUTHENTICATE,
-        format!(
-            "Bearer realm=\"{}/v2/auth/token\",service=\"floundr\",scope=\"{}\"",
-            app_url, requested_scope
-        )
-        .parse()
-        .unwrap(),
-    );
+    let resp_headers = auth_response_headers(&req);
+    if let Err(e) = valid_v2_repository(req.uri().path(), &mut conn).await {
+        tracing::error!("invalid repository: {}", e);
+        return Err((StatusCode::NOT_FOUND, resp_headers).into_response());
+    }
     match check_headers(&headers, &mut conn).await {
         Ok(auth) => {
             req.extensions_mut().insert(auth);
@@ -143,6 +139,25 @@ async fn is_pub_repo(path: &str, conn: &mut SqliteConnection) -> bool {
             .map(|r| r.is_public)
             .unwrap_or(false),
         None => false,
+    }
+}
+
+async fn valid_v2_repository(path: &str, conn: &mut SqliteConnection) -> Result<(), String> {
+    if path.starts_with("/v2/") && path.len() > 4 {
+        match path.split("/").nth(2) {
+            Some(repo) => sqlx::query!(
+                // check if repository exists
+                "SELECT id FROM repositories WHERE name = ?",
+                repo
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|_| "repository not found".to_string())
+            .map(|_| ()),
+            None => Err("repository not found".into()),
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -216,7 +231,7 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
     let auth = req
         .extensions()
         .get::<Auth>()
-        .ok_or((StatusCode::UNAUTHORIZED, auth_response_headers()).into_response())?;
+        .ok_or((StatusCode::UNAUTHORIZED, auth_response_headers(&req)).into_response())?;
     if let Some(claims) = &auth.claims {
         if claims.is_admin() {
             info!("user is administrator: {}", claims.sub);
@@ -224,7 +239,7 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
         } else {
             match Action::from_request(&req) {
                 Some(required_scope) => {
-                    let repo_name = req.uri().path().split('/').nth(2).unwrap_or_default();
+                    let repo_name = req.uri().path().split('/').nth(2).unwrap_or("*");
                     if let Some(scopes) = claims.scopes.0.iter().find(|(r, _)| r.eq(&repo_name)) {
                         if scopes.1.contains(&required_scope) {
                             info!("user has required scope: {}", required_scope);
@@ -241,20 +256,21 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
     }
     return Err((
         StatusCode::UNAUTHORIZED,
-        auth_response_headers(),
+        auth_response_headers(&req),
         "requested unauthorized scope",
     )
         .into_response());
 }
 
-fn auth_response_headers() -> HeaderMap {
+fn auth_response_headers(req: &Request) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
     let app_url = std::env::var("APP_URL").expect("APP_URL env var needs to be set");
+    let scope = get_requested_scope(req);
     resp_headers.insert(
         WWW_AUTHENTICATE,
         format!(
-            "Bearer realm=\"{}/v2/auth/token\",service=\"floundr\",scope=\"repository:*:*\"",
-            app_url
+            "Bearer realm=\"{}/auth/token\",service=\"floundr\",scope=\"{}\"",
+            app_url, scope,
         )
         .parse()
         .unwrap(),
@@ -286,9 +302,8 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
 
 #[tracing::instrument(skip(conn))]
 async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Auth, String> {
-    // check if it's an assigned API key (uuid v4)
-    // these carry all scopes for each repository
-    info!("validating bearer token: {}", token);
+    // check if it's an assigned API key
+    // these carry all scopes for every repository
     if let Ok(row) = query!("SELECT client_id FROM clients WHERE secret = ?", token)
         .fetch_one(&mut *conn)
         .await
@@ -316,7 +331,7 @@ async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Aut
 }
 
 fn is_public_route(path: &str) -> bool {
-    let routes = ["/repositories", "/v2/auth/token", "/v2/auth/login"];
+    let routes = ["/repositories", "/auth/token", "/auth/login"];
     routes.iter().any(|r| path.eq(*r))
 }
 

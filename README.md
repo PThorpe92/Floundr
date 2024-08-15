@@ -1,6 +1,6 @@
-<div align="center">
 # Floundr: Container Registry + TUI Client
 
+<div align="center">
 <img src="config/logo.png" alt="logo" width="140" />
 </div>
 

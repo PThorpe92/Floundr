@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension,
 };
-use http::header::{CONTENT_RANGE, RANGE};
+use http::header::RANGE;
 use sqlx::SqliteConnection;
 use std::collections::HashMap;
 use std::sync::Arc;

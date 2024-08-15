@@ -75,6 +75,7 @@ impl std::str::FromStr for Action {
             "delete" => Ok(Action::Delete),
             "push,pull" => Ok(Action::Push),
             "push,pull,delete" => Ok(Action::Delete),
+            "*" => Ok(Action::Delete),
             _ => Err(format!("invalid action: {}", s)),
         }
     }
@@ -84,19 +85,25 @@ pub type Repo = String;
 pub struct UserScope(HashMap<Repo, Vec<Action>>);
 
 impl UserScope {
-    pub fn is_allowed(&self, scope: &str) -> bool {
-        // this is going to be called on the claims scope
-        tracing::info!("checking scope: {}", scope);
-        let requested = UserScope::from_str(scope).unwrap_or_default();
-        for (repo, actions) in requested.0.iter() {
-            let available = self.0.get(repo);
-            if available.is_none() {
-                return false;
+    pub fn is_allowed(&self, requested: &str) -> bool {
+        // this is going to be called on the claims scope injected into the request by the
+        // middleware before it's assigned a scoped token
+        tracing::info!("checking scope: {}", requested);
+        let requested = UserScope::from_str(requested).unwrap_or_default();
+        for (repo, requested_actions) in requested.0.iter() {
+            if repo == "*" {
+                return self.0.values().next().is_some_and(|avail| {
+                    avail
+                        .iter()
+                        .all(|ax| ax.check_permission(requested_actions))
+                });
             }
-            for action in actions {
-                if !action.check_permission(available.unwrap()) {
-                    return false;
-                }
+            if self.0.get(repo).is_some_and(|avail| {
+                avail
+                    .iter()
+                    .any(|ax| !ax.check_permission(requested_actions))
+            }) {
+                return false;
             }
         }
         true
