@@ -161,7 +161,6 @@ impl LocalStorageDriver {
         pool: &mut SqliteConnection,
         data: BodyDataStream,
     ) -> Result<String, StorageError> {
-        info!("!!!!Writing blob for session: {session_id} chunk # {chunk}!!!!");
         let rel_path = PathBuf::from(name)
             .join("blobs")
             .join(session_id)
@@ -174,7 +173,7 @@ impl LocalStorageDriver {
         let file_path = self
             .base_path
             .join(rel_path)
-            .join(&format!("{chunk}"))
+            .join(format!("{chunk}"))
             .to_string_lossy()
             .to_string();
         let _ = query!("INSERT INTO blobs (repository_id, digest, file_path, upload_session_id) VALUES ((select id from repositories where name = ?), ?, ?, ?)", name, digest, file_path, session_id)
@@ -394,7 +393,7 @@ impl LocalStorageDriver {
             .await?;
         }
         let id = record.last_insert_rowid();
-        query!("INSERT INTO tags (repository_id, tag, manifest_id) VALUES ((SELECT id from repositories where name = ?), ?, ?)", name, reference, id).execute(pool).await?;
+        query!("INSERT OR REPLACE INTO tags (repository_id, tag, manifest_id) VALUES ((SELECT id from repositories where name = ?), ?, ?)", name, reference, id).execute(pool).await?;
         Ok(digest)
     }
 
@@ -414,61 +413,9 @@ impl LocalStorageDriver {
         Ok(())
     }
 
-    pub async fn delete_manifest(
-        &self,
-        pool: &mut SqliteConnection,
-        name: &str,
-        reference: &str,
-    ) -> Result<(), StorageError> {
-        if is_digest(reference) {
-            if let Ok(found) = sqlx::query!(
-                "SELECT m.file_path, m.id FROM manifests m
-            JOIN repositories r ON m.repository_id = r.id
-            WHERE m.digest = ? AND r.name = ?",
-                reference,
-                name
-            )
-            .fetch_one(&mut *pool)
-            .await
-            {
-                // Delete related tags and the manifest in one query
-                sqlx::query!(
-                    "DELETE FROM tags WHERE manifest_id = ?; DELETE FROM manifests WHERE id = ?",
-                    found.id,
-                    found.id
-                )
-                .execute(&mut *pool)
-                .await?;
-                tokio::fs::remove_file(found.file_path).await?;
-                return Ok(());
-            }
-        }
-        // If it's not a manifest digest, check if it's a tag
-        if let Ok(row) = sqlx::query!(
-            "SELECT m.file_path, m.id FROM manifests m
-         JOIN tags t ON t.manifest_id = m.id
-         JOIN repositories r ON t.repository_id = r.id
-         WHERE t.tag = ? AND r.name = ?",
-            reference,
-            name
-        )
-        .fetch_one(&mut *pool)
-        .await
-        {
-            info!("found manifest with file_path: {}", row.file_path);
-            tokio::fs::remove_file(row.file_path).await?;
-            // Delete the manifest and the tag in one query
-            sqlx::query!(
-            "DELETE FROM manifests WHERE id = ?; DELETE FROM tags WHERE tag = ? AND repository_id = (SELECT id from repositories WHERE name = ?)",
-            row.id,
-            reference,
-            name,
-        )
-        .execute(&mut *pool)
-        .await?;
-            return Ok(());
-        }
-        Err(StorageError::SqlxError(sqlx::Error::RowNotFound))
+    pub async fn delete_manifest(&self, file_path: &str) -> Result<(), StorageError> {
+        tokio::fs::remove_file(file_path).await?;
+        Ok(())
     }
 
     pub async fn create_repository(

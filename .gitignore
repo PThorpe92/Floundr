@@ -2,3 +2,5 @@
 .env
 /config/db.sqlite3
 /logs/*.log
+/logs/report.html
+/logs/*.xml

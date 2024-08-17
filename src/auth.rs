@@ -7,7 +7,7 @@ use crate::{
     database::DbConn,
     get_admin_scopes, get_user_scopes,
     util::{base64_decode, validate_registration, verify_login},
-    Action,
+    Action, APP_URL,
 };
 use axum::{
     extract::{Query, Request},
@@ -99,7 +99,7 @@ pub struct UserInfo {
 /// and if the claims has the required scope, the request is approved
 /// and the JWT is exchanged, having only the required scope, otherwise
 /// the request is denied.
-#[tracing::instrument(skip(conn))]
+#[tracing::instrument(skip(conn), level = "trace")]
 pub async fn auth_middleware(
     DbConn(mut conn): DbConn,
     mut req: Request,
@@ -111,7 +111,7 @@ pub async fn auth_middleware(
         tracing::error!("invalid repository: {}", e);
         return Err((StatusCode::NOT_FOUND, resp_headers).into_response());
     }
-    match check_headers(&headers, &mut conn).await {
+    match check_auth_headers(&headers, &mut conn).await {
         Ok(auth) => {
             req.extensions_mut().insert(auth);
             return Ok(next.run(req).await);
@@ -132,7 +132,7 @@ pub async fn auth_middleware(
 }
 
 async fn is_pub_repo(path: &str, conn: &mut SqliteConnection) -> bool {
-    match path.split("/").nth(2) {
+    match path.split('/').nth(2) {
         Some(repo) => sqlx::query!("SELECT is_public from repositories WHERE name = ?", repo)
             .fetch_one(&mut *conn)
             .await
@@ -144,7 +144,7 @@ async fn is_pub_repo(path: &str, conn: &mut SqliteConnection) -> bool {
 
 async fn valid_v2_repository(path: &str, conn: &mut SqliteConnection) -> Result<(), String> {
     if path.starts_with("/v2/") && path.len() > 4 {
-        match path.split("/").nth(2) {
+        match path.split('/').nth(2) {
             Some(repo) => sqlx::query!(
                 // check if repository exists
                 "SELECT id FROM repositories WHERE name = ?",
@@ -197,7 +197,10 @@ fn get_requested_scope(req: &Request) -> String {
     requested
 }
 
-async fn check_headers(headers: &HeaderMap, conn: &mut SqliteConnection) -> Result<Auth, String> {
+async fn check_auth_headers(
+    headers: &HeaderMap,
+    conn: &mut SqliteConnection,
+) -> Result<Auth, String> {
     let auth_header = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -226,7 +229,7 @@ async fn check_headers(headers: &HeaderMap, conn: &mut SqliteConnection) -> Resu
     Err(String::from("invalid auth header"))
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "trace")]
 pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response, Response> {
     let auth = req
         .extensions()
@@ -239,7 +242,7 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
         } else {
             match Action::from_request(&req) {
                 Some(required_scope) => {
-                    let repo_name = req.uri().path().split('/').nth(2).unwrap_or("*");
+                    let repo_name = get_repo_name_from_path(&req).unwrap_or("*");
                     if let Some(scopes) = claims.scopes.0.iter().find(|(r, _)| r.eq(&repo_name)) {
                         if scopes.1.contains(&required_scope) {
                             info!("user has required scope: {}", required_scope);
@@ -264,7 +267,7 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
 
 fn auth_response_headers(req: &Request) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
-    let app_url = std::env::var("APP_URL").expect("APP_URL env var needs to be set");
+    let app_url = APP_URL.get().unwrap();
     let scope = get_requested_scope(req);
     resp_headers.insert(
         WWW_AUTHENTICATE,
@@ -280,7 +283,7 @@ fn auth_response_headers(req: &Request) -> HeaderMap {
 
 async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result<Claims, String> {
     let decoded = base64_decode(token)?;
-    let parts: Vec<&str> = decoded.split(":").collect();
+    let parts: Vec<&str> = decoded.split(':').collect();
     let user = parts[0];
     let password = parts.get(1).unwrap_or(&"");
     let user_info = verify_login(conn, user, password)
@@ -300,7 +303,7 @@ async fn validate_basic_auth(token: &str, conn: &mut SqliteConnection) -> Result
     Ok(claims)
 }
 
-#[tracing::instrument(skip(conn))]
+#[tracing::instrument(skip(conn), level = "trace")]
 async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Auth, String> {
     // check if it's an assigned API key
     // these carry all scopes for every repository
@@ -317,17 +320,20 @@ async fn validate_bearer(token: &str, conn: &mut SqliteConnection) -> Result<Aut
             claims: Some(claims),
         });
     }
-    let secret = std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
-    let claims = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|e| e.to_string())?
-    .claims;
+    let claims = Claims::validate_jwt(token).map_err(|e| e.to_string())?;
     Ok(Auth {
         claims: Some(claims),
     })
+}
+
+fn get_repo_name_from_path(req: &Request) -> Option<&str> {
+    if let Some(path) = req.uri().path().strip_prefix("/v2/") {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() > 1 {
+            return Some(parts[1]);
+        }
+    }
+    None
 }
 
 fn is_public_route(path: &str) -> bool {
@@ -347,7 +353,7 @@ impl TokenResponse {
     }
 }
 
-#[tracing::instrument(skip(conn))]
+#[tracing::instrument(skip(conn), level = "trace")]
 pub async fn auth_token_get(
     DbConn(mut conn): DbConn,
     Query(params): Query<DockerLogin>,
@@ -355,7 +361,7 @@ pub async fn auth_token_get(
     req: Request,
 ) -> impl IntoResponse {
     let scope = params.scope.unwrap_or_default();
-    if let Ok(auth) = check_headers(&headers, &mut conn).await {
+    if let Ok(auth) = check_auth_headers(&headers, &mut conn).await {
         if let Some(ref claims) = auth.claims {
             if claims.is_valid() && claims.scopes.is_allowed(&scope) {
                 return (
@@ -522,7 +528,7 @@ impl Claims {
         }
     }
 
-    pub fn update_jwt(&self) -> String {
+    fn update_jwt(&self) -> String {
         let secret =
             std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY env var needs to be set");
         let expiration = chrono::offset::Local::now()
@@ -560,7 +566,7 @@ impl Claims {
         })
     }
 
-    pub fn validate_jwt(token: &str) -> Result<Self, String> {
+    fn validate_jwt(token: &str) -> Result<Self, String> {
         if let Ok(claims) = decode::<Claims>(
             token,
             &DecodingKey::from_secret(

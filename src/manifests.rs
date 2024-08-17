@@ -1,5 +1,8 @@
 use crate::{
-    codes::ErrorResponse, database::DbConn, storage_driver::Backend, util::strip_sha_header,
+    codes::ErrorResponse,
+    database::DbConn,
+    storage_driver::Backend,
+    util::{is_digest, strip_sha_header},
 };
 use axum::{
     extract::{Path, Request},
@@ -70,31 +73,27 @@ pub async fn get_manifest(
     let mut headers = HeaderMap::new();
     let name_ref = &name;
     let ref_reference = &reference;
-    if let Ok(record) = sqlx::query!("SELECT digest, file_path FROM manifests m JOIN tags t ON t.manifest_id = m.id WHERE t.repository_id = (SELECT id FROM repositories WHERE name = ?) AND t.tag = ?", name_ref, ref_reference)
+    if !is_digest(&reference) {
+        if let Ok(record) = sqlx::query!("SELECT digest, file_path FROM manifests m JOIN tags t ON t.manifest_id = m.id WHERE t.repository_id = (SELECT id FROM repositories WHERE name = ?) AND t.tag = ?", name_ref, ref_reference)
        .fetch_one(&mut *conn)
        .await {
        let digest = record.digest;
        let file_path = record.file_path;
         match blob_storage.read_manifest(&file_path).await {
             Ok(data) => {
-            headers.insert(DOCKER_DIGEST,  format!("sha256:{}", digest).parse().unwrap());
-            headers.insert(CONTENT_TYPE, MANIFEST_CONTENT_TYPE.parse().unwrap());
-                    match *req.method() {
-                        http::Method::HEAD => { return (StatusCode::OK, headers).into_response(); }
-                        http::Method::GET =>  {
-                            let resp = (StatusCode::OK, headers, data).into_response();
-                            tracing::info!("response: {:?}", resp);
-                            return resp;
-                            }
-                    _ => unreachable!(),
-                     }
-                    }
+                headers.insert(DOCKER_DIGEST,  format!("sha256:{}", digest).parse().unwrap());
+                headers.insert(CONTENT_TYPE, MANIFEST_CONTENT_TYPE.parse().unwrap());
+                let resp = (StatusCode::OK, headers, data).into_response();
+                tracing::info!("response: {:?}", resp);
+                return resp;
+                }
           Err(_) => {
                 error!("unable to find manifest with provided file_path and digest {} : {}", file_path, digest);
                 let code = crate::codes::Code::ManifestUnknown;
                 ErrorResponse::from_code(&code, "unable to find manifest for image").into_response()
           }
       };
+    }
     }
     if let Ok(record) = sqlx::query!("SELECT file_path, digest FROM manifests WHERE repository_id = (SELECT id FROM repositories WHERE name = ?) AND digest = ?", name, reference)
           .fetch_one(&mut *conn)
@@ -129,10 +128,27 @@ pub async fn get_manifest(
 pub async fn delete_manifest(
     Path((name, reference)): Path<(String, String)>,
     Extension(storage): Extension<Arc<Backend>>,
-    DbConn(mut conn): DbConn,
+    mut conn: DbConn,
 ) -> impl IntoResponse {
-    match storage.delete_manifest(&mut conn, &name, &reference).await {
-        Ok(_) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::NOT_FOUND,
+    let reference = strip_sha_header(&reference);
+    match conn.delete_manifest(&name, &reference).await {
+        Ok(file_path) => {
+            if let Err(err) = storage.delete_manifest(&file_path).await {
+                error!(
+                    "unable to delete manifest for image: {} \n {err}",
+                    reference
+                );
+            }
+            info!("deleted manifest for image: {}", reference);
+            (StatusCode::NO_CONTENT).into_response()
+        }
+        Err(e) => {
+            error!("unable to delete manifest for image: {} \n {e}", reference);
+            ErrorResponse::from_code(
+                &crate::codes::Code::ManifestUnknown,
+                "unable to delete manifest for image",
+            )
+            .into_response()
+        }
     }
 }

@@ -13,7 +13,36 @@ use std::{collections::HashMap, str::FromStr};
 
 use axum::extract::Request;
 use http::Method;
+use lazy_static::lazy_static;
 use sqlx::SqliteConnection;
+use tokio::sync::OnceCell;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+lazy_static! {
+    pub static ref APP_URL: OnceCell<String> = OnceCell::new();
+    pub static ref JWT_SECRET: OnceCell<String> = OnceCell::new();
+}
+
+pub fn set_env() {
+    let level = match std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()) {
+        s if s.eq_ignore_ascii_case("trace") => tracing::Level::TRACE,
+        s if s.eq_ignore_ascii_case("debug") => tracing::Level::DEBUG,
+        s if s.eq_ignore_ascii_case("info") => tracing::Level::INFO,
+        s if s.eq_ignore_ascii_case("warn") => tracing::Level::WARN,
+        s if s.eq_ignore_ascii_case("error") => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_max_level(level)
+        .with_ansi(true)
+        .pretty()
+        .finish();
+    subscriber.with(tracing_subscriber::fmt::layer()).init();
+    let app_url = std::env::var("APP_URL").expect("APP_URL must be set");
+    APP_URL.set(app_url).unwrap();
+    let jwt_secret = std::env::var("JWT_SECRET_KEY").expect("JWT_SECRET_KEY must be set");
+    JWT_SECRET.set(jwt_secret).unwrap();
+}
 
 #[derive(serde::Serialize, PartialEq, Eq, serde::Deserialize, Clone, Debug)]
 pub enum Action {
@@ -158,24 +187,17 @@ pub async fn get_user_scopes(conn: &mut SqliteConnection, user_id: &str) -> User
 }
 
 pub async fn get_admin_scopes(conn: &mut SqliteConnection) -> UserScope {
+    let repos = database::get_repositories(conn, false).await;
     UserScope(
-        sqlx::query!("SELECT * FROM repositories")
-            .fetch_all(conn)
-            .await
-            .expect("unable to fetch repositories")
+        repos
             .into_iter()
-            .map(|row| {
-                (
-                    row.name,
-                    Vec::from([Action::Pull, Action::Push, Action::Delete]),
-                )
-            })
+            .map(|row| (row, Vec::from([Action::Pull, Action::Push, Action::Delete])))
             .collect::<HashMap<Repo, _>>(),
     )
 }
 
 pub async fn default_public_scopes(conn: &mut SqliteConnection) -> UserScope {
-    let repos = database::get_public_repositories(conn).await;
+    let repos = database::get_repositories(conn, true).await;
     let mut scopes = HashMap::new();
     for repo in repos {
         scopes.insert(repo, vec![Action::Pull]);

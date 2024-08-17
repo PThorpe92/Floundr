@@ -4,6 +4,7 @@ use axum::{
     http::{request::Parts, StatusCode},
 };
 use sqlx::{query, sqlite::SqlitePoolOptions, Acquire, Executor, SqliteConnection, SqlitePool};
+use tracing::{error, info};
 
 use crate::Repo;
 
@@ -20,19 +21,20 @@ pub static TABLES: [&str; 8] = [
 
 pub struct DbConn(pub sqlx::pool::PoolConnection<sqlx::Sqlite>);
 
-pub async fn initdb(
-    path: &str,
-    email: Option<String>,
-    password: Option<String>,
-) -> sqlx::Pool<sqlx::Sqlite> {
+pub async fn initdb(path: &str) -> sqlx::Pool<sqlx::Sqlite> {
     println!("connecting to sqlite db at: {}", path);
+    if !std::path::PathBuf::from(path).exists() {
+        tokio::fs::File::create(path)
+            .await
+            .expect("unable to create sqlite db");
+    }
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect(path)
         .await
         .expect("unable to connect to sqlite db pool");
     let mut conn = pool.acquire().await.expect("unable to acquire connection");
-    migrate(&mut conn, email, password)
+    migrate(&mut conn, None, None)
         .await
         .expect("unable to migrate db");
     if query!("SELECT COUNT(*) as client_count from clients")
@@ -181,22 +183,94 @@ pub async fn drop_tables(pool: &mut SqliteConnection) -> Result<(), sqlx::Error>
     Ok(())
 }
 
-pub async fn get_public_repositories(conn: &mut SqliteConnection) -> Vec<Repo> {
-    sqlx::query!("SELECT id, name, is_public FROM repositories WHERE is_public = 1")
+pub async fn get_repositories(conn: &mut SqliteConnection, pub_only: bool) -> Vec<Repo> {
+    let repos = sqlx::query!("SELECT id, name, is_public FROM repositories")
         .fetch_all(&mut *conn)
         .await
-        .expect("unable to fetch public repositories")
+        .expect("unable to fetch public repositories");
+    if pub_only {
+        return repos
+            .iter()
+            .filter_map(|row| {
+                if row.is_public {
+                    Some(row.name.parse().unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    repos
         .iter()
-        .map(|r| r.name.parse().unwrap())
+        .filter_map(|row| row.name.parse().ok())
         .collect()
 }
-
-pub async fn get_repositories(conn: &mut SqliteConnection) -> Vec<Repo> {
-    sqlx::query!("SELECT id, name, is_public FROM repositories")
-        .fetch_all(&mut *conn)
+impl DbConn {
+    pub async fn delete_manifest(
+        &mut self,
+        name: &str,
+        reference: &str,
+    ) -> Result<String, sqlx::Error> {
+        let mut tx = self.begin().await?;
+        match sqlx::query!(
+            "SELECT m.file_path, m.id, m.digest FROM manifests m
+        JOIN repositories r ON m.repository_id = r.id
+        LEFT JOIN tags t ON m.id = t.manifest_id
+        WHERE (m.digest = $1 OR t.tag = $1) AND r.name = $2",
+            reference,
+            name
+        )
+        .fetch_one(&mut *tx)
         .await
-        .expect("unable to fetch public repositories")
-        .iter()
-        .map(|r| r.name.parse().unwrap())
-        .collect()
+        {
+            Ok(found) => {
+                info!("found manifest with ref: {}", reference);
+                sqlx::query!(
+                    "DELETE FROM manifest_layers WHERE manifest_id = ?",
+                    found.id
+                )
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query!("DELETE FROM tags WHERE manifest_id = ?", found.id)
+                    .execute(&mut *tx)
+                    .await?;
+                if let Ok(layers) = sqlx::query!(
+                    "SELECT digest FROM manifest_layers WHERE manifest_id = ?",
+                    found.id
+                )
+                .fetch_all(&mut *tx)
+                .await
+                {
+                    for layer in layers {
+                        if let Err(err) = sqlx::query!(
+                            "UPDATE blobs SET ref_count = ref_count - 1 WHERE digest = ?",
+                            layer.digest
+                        )
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            error!("unable to update blob ref_count: {}", err);
+                        }
+                        if let Err(err) = sqlx::query!(
+                            "DELETE FROM blobs WHERE digest = ? AND ref_count <= 0",
+                            layer.digest
+                        )
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            error!("unable to delete blob: {}", err);
+                        }
+                    }
+                }
+                sqlx::query!("DELETE FROM manifests WHERE id = ?", found.id)
+                    .execute(&mut *tx)
+                    .await?;
+                Ok(found.file_path)
+            }
+            Err(err) => {
+                error!("unable to find manifest with reference: {}", reference);
+                Err(err)
+            }
+        }
+    }
 }

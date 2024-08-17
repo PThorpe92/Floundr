@@ -5,11 +5,10 @@ use reqwest::{
     Client,
 };
 use std::io::{self};
-use tracing::{error, info, Level};
+use tracing::{info, Level};
 use tui_client::{
     app::{App, Tui, CLIENT, HEADERS},
     events::AppEventHandler,
-    requests::{get_all_users, get_manifests, get_repositories},
 };
 
 #[tokio::main]
@@ -78,7 +77,7 @@ async fn login_basic(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     headers.append(USER_AGENT, user_agent.clone());
     headers.append(AUTHORIZATION, token_value);
     let response = client
-        .get(format!("{}/v2/auth/token", url))
+        .get(format!("{}/auth/token", url))
         .headers(headers.clone())
         .send()
         .await?;
@@ -103,7 +102,7 @@ async fn login_bearer(
     headers.insert(USER_AGENT, user_agent.clone());
     headers.insert(AUTHORIZATION, token_value);
     let response = client
-        .get(format!("{}/v2/auth/token", url))
+        .get(format!("{}/auth/token", url))
         .headers(headers.clone())
         .send()
         .await?;

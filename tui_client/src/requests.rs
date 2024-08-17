@@ -114,7 +114,7 @@ pub async fn send_delete_request(url: String) -> AppResult<Response> {
 
 pub async fn create_new_user(url: String, user: RegisterUserRequest) -> AppResult<Response> {
     info!("sending user {:?}", user);
-    let res = send_post_request(format!("{}/v2/auth/register", &url), user).await?;
+    let res = send_post_request(format!("{}/auth/register", &url), user).await?;
     info!("response is {:?}", res);
     if res.status().is_success() {
         get_all_users(&url).await?;
@@ -147,7 +147,7 @@ pub async fn delete_repository(url: String, repo: String) -> AppResult<()> {
 }
 
 pub async fn get_tokens(url: &str) -> AppResult<()> {
-    let url = format!("{}/v2/auth/clients", url);
+    let url = format!("{}/auth/clients", url);
     let res = send_get_request(url).await?;
     let tokens: Vec<AuthClient> = res.json().await?;
     info!("Tokens received: {:?}", tokens);

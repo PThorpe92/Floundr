@@ -201,12 +201,10 @@ macro_rules! backend_methods {
 
             pub async fn delete_manifest(
                 &self,
-                pool: &mut SqliteConnection,
-                name: &str,
-                reference: &str,
+                file_path: &str,
             ) -> Result<(), StorageError> {
                 match self {
-                    $(Self::$variant(driver) => driver.delete_manifest(pool, name, reference).await,)+
+                    $(Self::$variant(driver) => driver.delete_manifest(file_path).await,)+
                 }
             }
 

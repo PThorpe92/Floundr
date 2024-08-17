@@ -3,7 +3,7 @@ use axum::{
     routing::{delete, get, head, patch, post, put},
     Extension, Router,
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use floundr::{
     auth::{
         auth_middleware, auth_token_get, check_scope_middleware, get_auth_clients, login_user,
@@ -18,6 +18,7 @@ use floundr::{
     },
     database::{self, initdb, migrate_fresh},
     manifests::{delete_manifest, get_manifest, push_manifest},
+    set_env,
     storage_driver::{Backend, DriverType},
     users::{delete_user, generate_token, get_users},
 };
@@ -27,7 +28,6 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(name = "floundr")]
@@ -36,43 +36,66 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 struct App {
     #[arg(long, short = 'p', default_value = "8080")]
     port: Option<usize>,
-    #[arg(long)]
+    #[arg(long = "storage-path")]
     storage_path: Option<PathBuf>,
-    #[arg(long)]
-    container_home_dir: Option<PathBuf>,
-    #[arg(long)]
-    db_path: Option<String>,
-    #[arg(long, default_value = "false")]
-    migrate_fresh: bool,
-    #[arg(long, help = "Create a new repository with a given name")]
-    new_repo: Option<String>,
     #[arg(
-        long,
-        requires = "new_repo",
-        help = "whether the new repository is public",
-        default_missing_value = "true"
+        long = "home-dir",
+        help = "path to the floundr home directory (default is $XDG_DATA_HOME/floundr)"
     )]
-    public: Option<bool>,
-    #[arg(long, help = "email for new user")]
-    email: Option<String>,
-    #[arg(long, requires = "email", help = "new user password")]
-    password: Option<String>,
+    container_home_dir: Option<PathBuf>,
+    #[arg(long = "db-path", short = 'd', help = "path to the sqlite database")]
+    db_path: Option<String>,
     #[arg(long, default_value = "local", value_enum)]
     driver: DriverType,
     #[arg(long, default_value = "false", help = "Enable debug mode")]
     debug: bool,
-    #[arg(
-        long,
-        help = "generate new registry client secret for a user and write to file",
-        requires = "email",
-        default_missing_value = "secret.txt"
+    #[command(subcommand)]
+    command: Option<Box<Command>>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    #[command(about = "Migrate the database to a fresh state")]
+    MigrateFresh,
+
+    #[command(about = "Create a new repository with the given name")]
+    NewRepo {
+        #[arg(help = "name of the new repository", required(true))]
+        name: String,
+        #[arg(
+            long,
+            default_value = "false",
+            help = "whether the new repository is public"
+        )]
+        public: bool,
+    },
+
+    #[command(
+        about = "Create a new user with the given email",
+        arg_required_else_help(true)
     )]
-    secret: Option<String>,
+    NewUser {
+        #[arg(help = "new user email", required(true))]
+        email: String,
+        #[arg(long, requires = "email", help = "new user password", required(true))]
+        password: String,
+    },
+
+    #[command(about = "Generate a new API key for a user with administrative privileges")]
+    GenKey {
+        email: String,
+        #[arg(
+            long,
+            default_value = "key.txt",
+            help = "Output file for the generated key"
+        )]
+        output_file: String,
+    },
 }
 
 #[tokio::main]
 async fn main() {
-    let _ = dotenvy::dotenv().ok();
+    dotenvy::dotenv().ok();
     let args = App::parse();
     let home = args
         .container_home_dir
@@ -97,15 +120,14 @@ async fn main() {
         args.storage_path.as_ref().unwrap_or(&home),
     );
     info!("storage path home: {:?}", storage.base_path());
-    let email = args.email.clone();
-    let password = args.password.clone();
     let db_url = args
         .db_path
         .as_ref()
         .cloned()
-        .unwrap_or_else(|| std::env::var("DATABASE_URL").unwrap_or("floundr.db".to_string()));
-    let pool = initdb(&db_url, email.clone(), password.clone()).await;
+        .unwrap_or_else(|| std::env::var("DB_PATH").unwrap_or("db.sqlite3".to_string()));
+    let pool = initdb(&db_url).await;
     let mut conn = pool.acquire().await.expect("unable to acquire connection");
+    set_env();
     let _ = handle_args(&args, &mut conn, &storage).await;
     let host = std::env::var("HOST").unwrap_or("127.0.0.1".to_string());
     let port = args.port.unwrap_or(8080);
@@ -113,12 +135,6 @@ async fn main() {
         eprintln!("Invalid address: {host}:{port}");
         std::process::exit(1);
     });
-    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(true)
-        .pretty()
-        .finish();
-    subscriber.with(tracing_subscriber::fmt::layer()).init();
     info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -173,37 +189,47 @@ async fn main() {
         )
         .layer(Extension(axum::middleware::from_extractor::<Auth>()))
         .with_state(pool);
-
     axum::serve(listener, routes.into_make_service())
         .await
         .expect("unable to start server");
 }
 
 async fn handle_args(args: &App, conn: &mut SqliteConnection, storage: &Backend) {
-    let email = args.email.clone();
-    let password = args.password.clone();
-    if args.migrate_fresh {
-        migrate_fresh(conn, email.clone(), password.clone())
-            .await
-            .expect("unable to migrate database");
-    }
-    if let Some(name) = &args.new_repo {
-        let _ = storage
-            .create_repository(conn, name, args.public.unwrap_or(true))
-            .await;
-    }
-    if args.email.as_ref().is_some() {
-        let _ = database::seed_default_user(conn, email, password).await;
-    }
-    if let Some(ref file) = args.secret {
-        if args.email.is_none() {
-            eprintln!("email is required to generate secret");
-            std::process::exit(1);
+    match args.command.as_deref() {
+        Some(Command::MigrateFresh) => {
+            migrate_fresh(conn, None, None)
+                .await
+                .expect("unable to migrate database");
+            info!("Migrating the database to a fresh state...");
         }
-        let email = args.email.as_ref().unwrap();
-        let secret = database::generate_secret(conn, None, email)
-            .await
-            .expect("unable to generate secret");
-        tokio::fs::write(file, secret).await.unwrap();
+        Some(Command::NewRepo { name, public }) => {
+            let _ = storage.create_repository(conn, name, *public).await;
+            println!("Created new repository: {} (public: {})", name, public);
+            std::process::exit(0);
+        }
+        Some(Command::NewUser { email, password }) => {
+            let _ = database::seed_default_user(
+                conn,
+                Some(email.to_owned()),
+                Some(password.to_owned()),
+            )
+            .await;
+            println!("Creating new user: {} with password: {}", email, password);
+            std::process::exit(0);
+        }
+        Some(Command::GenKey { email, output_file }) => {
+            let secret = database::generate_secret(conn, None, email)
+                .await
+                .expect("unable to generate secret");
+            tokio::fs::write(output_file, secret).await.unwrap();
+            info!(
+                "Generated new API key for: {} and saving to: {}",
+                email, output_file
+            );
+            std::process::exit(0);
+        }
+        None => {
+            info!("No subcommand was used. Running the default behavior...");
+        }
     }
 }
