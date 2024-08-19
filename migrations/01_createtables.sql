@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS blobs (
     ref_count INTEGER NOT NULL DEFAULT 0,
     chunk_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS tags (
     repository_id INTEGER NOT NULL,
     tag TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id),
-    FOREIGN KEY (manifest_id) REFERENCES manifests(id),
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
     UNIQUE (repository_id, tag)
 );
 
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS manifests (
     size INTEGER NOT NULL,
     schema_version INTEGER NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS manifest_layers (
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS manifest_layers (
     size INTEGER NOT NULL,
     media_type TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (manifest_id) REFERENCES manifests(id)
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
@@ -78,8 +78,8 @@ CREATE TABLE IF NOT EXISTS repository_scopes (
     push BOOLEAN NOT NULL DEFAULT FALSE,
     pull BOOLEAN NOT NULL DEFAULT FALSE,
     del BOOLEAN NOT NULL DEFAULT FALSE,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (repository_id) REFERENCES repositories(id)
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS clients (
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     token TEXT NOT NULL UNIQUE,
     client_id TEXT UNIQUE,
     expires TIMESTAMP NOT NULL DEFAULT (datetime('now', '+1 day')),
-    FOREIGN KEY (client_id) REFERENCES clients(client_id),
+    FOREIGN KEY (client_id) REFERENCES clients(client_id) ON DELETE CASCADE,
     FOREIGN KEY (account) REFERENCES users(email)
 );
 

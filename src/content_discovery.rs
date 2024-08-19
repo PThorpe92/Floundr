@@ -104,7 +104,6 @@ pub async fn get_tags_list(
     match query.fetch_all(&mut *conn).await {
         Ok(rows) => {
             let tags: Vec<String> = rows.into_iter().map(|row| row.get(0)).collect();
-
             let mut headers = HeaderMap::new();
             if let Some(limit) = n {
                 if tags.len() == limit {

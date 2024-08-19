@@ -7,12 +7,12 @@ use sha2::{Digest, Sha256};
 pub fn calculate_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 pub fn validate_digest(data: &[u8], digest: &str) -> Result<(), StorageError> {
     let calculated_digest = calculate_digest(data);
-    if calculated_digest != digest {
+    if !calculated_digest.eq(digest) {
         return Err(StorageError::DigestError);
     }
     Ok(())
@@ -28,18 +28,6 @@ pub fn path_is_valid(path: &str) -> bool {
         }
     }
     components.count() == 1
-}
-
-pub fn strip_sha_header(digest: &str) -> String {
-    if digest.starts_with("sha256:") {
-        digest.split(':').nth(1).unwrap().to_string()
-    } else {
-        digest.to_string()
-    }
-}
-
-pub fn is_digest(digest: &str) -> bool {
-    digest.starts_with("sha256:") || digest.len() >= 64
 }
 
 pub fn base64_decode(data: &str) -> Result<String, String> {
@@ -96,7 +84,7 @@ pub async fn verify_login(
 }
 
 pub fn validate_registration(email: &str, psw: &str, confirm: &str) -> Result<(), String> {
-    if !(psw.eq(confirm) && email.contains("@") && psw.len() >= 8 && email.contains(".")) {
+    if !(psw.eq(confirm) && email.contains('@') && psw.len() >= 8 && email.contains('.')) {
         return Err("Invalid registration".to_string());
     }
     Ok(())
@@ -106,16 +94,15 @@ use serde::de::{self, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserializer, Serializer};
 use std::fmt;
+use std::str::FromStr;
 
 pub fn scopes_to_vec<S>(scopes: &UserScope, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     let mut seq = serializer.serialize_seq(Some(scopes.0.len()))?;
-    for (repo, actions) in scopes.0.iter() {
-        for action in actions {
-            seq.serialize_element(&format!("repository:{}:{}", repo, action))?;
-        }
+    for (repo, action) in scopes.0.iter() {
+        seq.serialize_element(&format!("repository:{}:{}", repo, action))?;
     }
     seq.end()
 }
@@ -141,16 +128,20 @@ where
 
             while let Some(scope_str) = seq.next_element::<String>()? {
                 let parts: Vec<&str> = scope_str.split(':').collect();
+                // scope can be between one to three parts
+                // scopes can also be pull,push,delete
                 if parts.len() == 3 {
+                    if parts[2].split(',').count() > 1 {
+                        let greatest = parts[2]
+                            .split(',')
+                            .map(|s| Action::from_str(s).unwrap_or(Action::Pull))
+                            .max_by(|a, b| a.cmp(b))
+                            .unwrap();
+                        map.0.insert(parts[1].to_string(), greatest);
+                    }
                     map.0
                         .entry(parts[1].to_string())
-                        .or_insert_with(Vec::new)
-                        .push(match parts[2] {
-                            "pull" => Action::Pull,
-                            "push" => Action::Push,
-                            "delete" => Action::Delete,
-                            _ => return Err(de::Error::custom("Invalid scope format")),
-                        });
+                        .or_insert(Action::from_str(parts[2]).unwrap());
                 } else {
                     return Err(de::Error::custom("Invalid scope format"));
                 }

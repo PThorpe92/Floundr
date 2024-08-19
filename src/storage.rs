@@ -1,6 +1,6 @@
 use crate::{
     storage_driver::StorageError,
-    util::{calculate_digest, is_digest, validate_digest},
+    util::{calculate_digest, validate_digest},
 };
 use axum::body::BodyDataStream;
 use axum::extract::{FromRef, FromRequestParts};
@@ -13,7 +13,7 @@ use shared::ImageManifest;
 use sqlx::{query, SqliteConnection};
 use std::io::{self};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::{fs::File, io::BufWriter};
 use tokio_util::io::StreamReader;
 use tracing::{debug, error, info};
@@ -221,10 +221,14 @@ impl LocalStorageDriver {
     }
 
     pub async fn read_manifest(&self, path: &str) -> Result<Vec<u8>, StorageError> {
-        let mut file = File::open(path).await?;
         let mut data = Vec::new();
-        file.read_to_end(&mut data).await?;
-        Ok(data)
+        match File::open(path).await?.read_to_end(&mut data).await {
+            Ok(_) => Ok(data),
+            Err(e) => {
+                error!("error reading manifest: {:?}", e);
+                Err(StorageError::IoError(e))
+            }
+        }
     }
 
     pub async fn new_session(
@@ -351,33 +355,27 @@ impl LocalStorageDriver {
         reference: &str,
         data: BodyDataStream,
     ) -> Result<String, StorageError> {
-        let path = self.stream_to_file("manifests", reference, data).await?;
+        let path = self
+            .stream_to_file(
+                std::path::PathBuf::from(name)
+                    .join("manifests")
+                    .to_str()
+                    .expect("invalid path"),
+                reference,
+                data,
+            )
+            .await?;
         info!("successfully wrote manifest to path: {:?}", path);
         let digest = calculate_digest(&tokio::fs::read(&path).await?);
-        let file_path = self
-            .base_path
-            .join(name)
-            .join("manifests")
-            .join(&digest)
-            .to_string_lossy()
-            .to_string();
-        info!("writing manifest to: {:?}", file_path);
-        if let Err(e) = tokio::fs::rename(&path, &file_path).await {
-            error!("Error renaming manifest file: {:?}", e);
-            // possible the directory doesnt exist
-            let _ = tokio::fs::create_dir_all(self.base_path.join(name).join("manifests")).await;
-            tokio::fs::rename(&path, &file_path).await?;
-        }
-        let img: ImageManifest =
-            serde_json::from_str(&tokio::fs::read_to_string(&file_path).await?).map_err(|_| {
+        let img: ImageManifest = serde_json::from_str(&tokio::fs::read_to_string(&path).await?)
+            .map_err(|_| {
                 StorageError::IoError(std::io::Error::new(
                     io::ErrorKind::InvalidData,
                     "error deserializing into ImageManifest",
                 ))
             })?;
-        let mut file = tokio::fs::File::create(file_path.clone()).await?;
-        file.write_all(&serde_json::to_vec(&img).unwrap()).await?;
         let cfg = img.config.unwrap_or_default();
+        let file_path = path.to_string_lossy().to_string();
         let record = query!("INSERT INTO manifests (repository_id, digest, file_path, media_type, size, schema_version)
              VALUES ((select id from repositories where name = ?), ?, ?, ?, ?, ?)",
             name, digest, file_path, img.media_type, cfg.size, img.schema_version)

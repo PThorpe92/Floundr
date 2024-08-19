@@ -2,7 +2,7 @@ use crate::{
     codes::{Code, ErrorResponse},
     database::DbConn,
     storage_driver::{Backend, StorageError},
-    util::{parse_content_length, parse_content_range, strip_sha_header},
+    util::{parse_content_length, parse_content_range},
 };
 use axum::{
     extract::{Path, Query, Request},
@@ -27,14 +27,10 @@ pub async fn get_blob(
     DbConn(mut conn): DbConn,
     Extension(blob_storage): Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
-    let digest = strip_sha_header(&digest);
     match blob_storage.read_blob(&mut conn, &name, &digest).await {
         Ok(data) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                "Docker-Content-Digest",
-                format!("sha256:{}", digest).parse().unwrap(),
-            );
+            headers.insert("Docker-Content-Digest", digest.parse().unwrap());
             (headers, data).into_response()
         }
         Err(_) => ErrorResponse::from_code(&Code::BlobUnknown, String::from("blob not found"))
@@ -48,7 +44,6 @@ pub async fn check_blob(
     DbConn(mut conn): DbConn,
 ) -> impl IntoResponse {
     debug!("HEAD /v2/{}/blobs/{}", name, digest);
-    let digest = strip_sha_header(&digest);
     let exists = sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -71,7 +66,6 @@ pub async fn delete_blob(
     storage: Extension<Arc<Backend>>,
 ) -> impl IntoResponse {
     debug!("DELETE /v2/{}/blobs/{}", name, digest);
-    let digest = strip_sha_header(&digest);
     if sqlx::query!("SELECT COUNT(*) as count from blobs join repositories r on r.id = (select id from repositories where name = ?) AND digest = ?", name, digest)
        .fetch_one(&mut *conn)
        .await
@@ -147,7 +141,6 @@ pub async fn put_upload_session_blob(
         match upload_chunk(&name, &session_id, cloned, &mut conn, request).await {
             Ok(result_digest) => {
                 let digest = query.digest.unwrap();
-                let result_digest = format!("sha256:{}", result_digest);
                 if !result_digest.eq(&digest) {
                     error!("{} did not match {}", result_digest, digest);
                     let code = crate::codes::Code::DigestInvalid;
@@ -182,7 +175,6 @@ async fn finish_upload_session(
         .combine_chunks(conn, name, session_id)
         .await
         .unwrap();
-    let digest = format!("sha256:{}", digest);
     let location = format!("/v2/{}/blobs/{}", name, digest);
     let mut return_headers = HeaderMap::new();
     return_headers.insert(LOCATION, location.parse().unwrap());

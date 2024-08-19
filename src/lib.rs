@@ -44,20 +44,41 @@ pub fn set_env() {
     JWT_SECRET.set(jwt_secret).unwrap();
 }
 
-#[derive(serde::Serialize, PartialEq, Eq, serde::Deserialize, Clone, Debug)]
+#[derive(serde::Serialize, PartialEq, Eq, serde::Deserialize, Clone, Copy, Debug)]
 pub enum Action {
     Pull,
     Push,
     Delete,
 }
+
+impl PartialOrd for Action {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Action {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Action::Pull, Action::Pull) => std::cmp::Ordering::Equal,
+            (Action::Pull, Action::Push) => std::cmp::Ordering::Less,
+            (Action::Pull, Action::Delete) => std::cmp::Ordering::Less,
+            (Action::Push, Action::Pull) => std::cmp::Ordering::Greater,
+            (Action::Push, Action::Push) => std::cmp::Ordering::Equal,
+            (Action::Push, Action::Delete) => std::cmp::Ordering::Less,
+            (Action::Delete, Action::Pull) => std::cmp::Ordering::Greater,
+            (Action::Delete, Action::Push) => std::cmp::Ordering::Greater,
+            (Action::Delete, Action::Delete) => std::cmp::Ordering::Equal,
+        }
+    }
+}
+
 impl Action {
-    pub fn check_permission(&self, actions: &[Action]) -> bool {
-        // self here is the users available scope
-        // actions is the requested scope
+    pub fn check_permission(&self, requested: Action) -> bool {
         match self {
-            Action::Pull => actions.contains(&Action::Pull),
-            Action::Push => actions.contains(&Action::Push),
-            Action::Delete => true,
+            Action::Delete => true, // Delete can perform any action
+            Action::Push => requested.eq(&Action::Pull) || requested.eq(&Action::Push),
+            Action::Pull => requested.eq(&Action::Pull),
         }
     }
 
@@ -67,7 +88,7 @@ impl Action {
             Method::PUT | Method::POST | Method::PATCH => Some(Self::Push),
             Method::DELETE => Some(Self::Delete),
             _ => {
-                if path.contains("blobs") {
+                if path.starts_with("/v2/") {
                     Some(Self::Pull)
                 } else {
                     None
@@ -111,29 +132,25 @@ impl std::str::FromStr for Action {
 }
 pub type Repo = String;
 #[derive(serde::Serialize, Default, serde::Deserialize, Clone, Debug)]
-pub struct UserScope(HashMap<Repo, Vec<Action>>);
+pub struct UserScope(HashMap<Repo, Action>);
 
 impl UserScope {
-    pub fn is_allowed(&self, requested: &str) -> bool {
-        // this is going to be called on the claims scope injected into the request by the
-        // middleware before it's assigned a scoped token
-        tracing::info!("checking scope: {}", requested);
-        let requested = UserScope::from_str(requested).unwrap_or_default();
-        for (repo, requested_actions) in requested.0.iter() {
-            if repo == "*" {
-                return self.0.values().next().is_some_and(|avail| {
-                    avail
-                        .iter()
-                        .all(|ax| ax.check_permission(requested_actions))
-                });
-            }
-            if self.0.get(repo).is_some_and(|avail| {
-                avail
-                    .iter()
-                    .any(|ax| !ax.check_permission(requested_actions))
-            }) {
+    pub fn is_allowed(&self, repo: &str, action: Action) -> bool {
+        tracing::info!("checking scope: {} {}", repo, action);
+        if repo == "*" {
+            if self
+                .0
+                .values()
+                .any(|available_action| !available_action.check_permission(action))
+            {
                 return false;
             }
+        } else if let Some(available_action) = self.0.get(repo) {
+            if !available_action.check_permission(action) {
+                return false;
+            }
+        } else {
+            return false;
         }
         true
     }
@@ -149,11 +166,15 @@ impl FromStr for UserScope {
                 return Err(format!("invalid scope: {}", scope));
             }
             let repo = parts[1];
-            let actions = parts[2].parse::<Action>().unwrap();
+            let action = parts[2].parse::<Action>().unwrap();
             scopes
                 .entry(repo.to_string())
-                .or_insert_with(Vec::new)
-                .extend_from_slice(&actions.to_vec());
+                .and_modify(|existing_action| {
+                    if action > *existing_action {
+                        *existing_action = action;
+                    }
+                })
+                .or_insert(action);
         }
         tracing::info!("parsed scopes: {:?}", scopes);
         Ok(UserScope(scopes))
@@ -174,14 +195,14 @@ pub async fn get_user_scopes(conn: &mut SqliteConnection, user_id: &str) -> User
     .expect("unable to fetch user scopes");
     let mut scopes = UserScope::default();
     for row in rows {
-        scopes.0.insert(
-            row.name,
-            Vec::from([
-                if row.pull { Action::Pull } else { continue },
-                if row.push { Action::Push } else { continue },
-                if row.del { Action::Delete } else { continue },
-            ]),
-        );
+        let highest_action = if row.del {
+            Action::Delete
+        } else if row.push {
+            Action::Push
+        } else {
+            Action::Pull
+        };
+        scopes.0.insert(row.name, highest_action);
     }
     scopes
 }
@@ -191,7 +212,7 @@ pub async fn get_admin_scopes(conn: &mut SqliteConnection) -> UserScope {
     UserScope(
         repos
             .into_iter()
-            .map(|row| (row, Vec::from([Action::Pull, Action::Push, Action::Delete])))
+            .map(|row| (row, Action::Delete))
             .collect::<HashMap<Repo, _>>(),
     )
 }
@@ -200,7 +221,7 @@ pub async fn default_public_scopes(conn: &mut SqliteConnection) -> UserScope {
     let repos = database::get_repositories(conn, true).await;
     let mut scopes = HashMap::new();
     for repo in repos {
-        scopes.insert(repo, vec![Action::Pull]);
+        scopes.insert(repo, Action::Pull);
     }
     UserScope(scopes)
 }

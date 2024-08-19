@@ -177,8 +177,9 @@ pub async fn migrate(
 pub async fn drop_tables(pool: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     for table in TABLES {
-        tx.execute(sqlx::query(&format!("DROP TABLE {};", table)))
-            .await?;
+        let _ = tx
+            .execute(sqlx::query(&format!("DROP TABLE {};", table)))
+            .await;
     }
     Ok(())
 }

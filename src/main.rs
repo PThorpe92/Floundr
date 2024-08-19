@@ -141,7 +141,6 @@ async fn main() {
         .expect("unable to bind to port");
 
     let routes = Router::new()
-        .route("/v2/", get(get_v2))
         .route("/auth/login", post(login_user))
         .route("/auth/token", get(auth_token_get))
         .route("/auth/register", post(register_user))
@@ -152,6 +151,7 @@ async fn main() {
         .route("/users", get(get_users))
         .route("/users/:email", delete(delete_user))
         .route("/users/:email/tokens", post(generate_token))
+        .route("/v2/", get(get_v2))
         .route("/v2/:name/blobs/:digest", put(put_upload_blob))
         .route("/v2/:name/blobs/:digest", get(get_blob))
         .route("/v2/:name/blobs/:digest", head(check_blob))
@@ -167,7 +167,6 @@ async fn main() {
         .route("/v2/:name/blobs/:digest", delete(delete_blob))
         .route("/v2/:name/tags/list", get(get_tags_list))
         .route("/v2/:name/manifests/:reference", get(get_manifest))
-        .route("/v2/:name/manifests/:reference", head(get_manifest))
         .route("/v2/:name/manifests/:reference", put(push_manifest))
         .route("/v2/:name/manifests/:reference", delete(delete_manifest))
         .layer(from_fn(check_scope_middleware))

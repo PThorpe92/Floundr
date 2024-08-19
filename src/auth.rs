@@ -1,4 +1,4 @@
-use std::fmt::Formatter;
+use std::{fmt::Formatter, str::FromStr};
 
 use super::UserScope;
 use crate::{
@@ -243,11 +243,17 @@ pub async fn check_scope_middleware(req: Request, next: Next) -> Result<Response
             match Action::from_request(&req) {
                 Some(required_scope) => {
                     let repo_name = get_repo_name_from_path(&req).unwrap_or("*");
-                    if let Some(scopes) = claims.scopes.0.iter().find(|(r, _)| r.eq(&repo_name)) {
-                        if scopes.1.contains(&required_scope) {
-                            info!("user has required scope: {}", required_scope);
-                            return Ok(next.run(req).await);
-                        }
+                    if claims.scopes.is_allowed(repo_name, required_scope) {
+                        info!("user has required scope: {}", required_scope);
+                        return Ok(next.run(req).await);
+                    } else {
+                        info!("user does not have required scope: {}", required_scope);
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            auth_response_headers(&req),
+                            "requested unauthorized scope",
+                        )
+                            .into_response());
                     }
                 }
                 None => {
@@ -360,10 +366,16 @@ pub async fn auth_token_get(
     headers: HeaderMap,
     req: Request,
 ) -> impl IntoResponse {
-    let scope = params.scope.unwrap_or_default();
     if let Ok(auth) = check_auth_headers(&headers, &mut conn).await {
         if let Some(ref claims) = auth.claims {
-            if claims.is_valid() && claims.scopes.is_allowed(&scope) {
+            let requested = get_requested_scope(&req);
+            let scope = UserScope::from_str(&requested).unwrap();
+            if claims.is_valid()
+                && claims.scopes.is_allowed(
+                    scope.0.keys().next().unwrap(),
+                    *scope.0.values().next().unwrap(),
+                )
+            {
                 return (
                     StatusCode::OK,
                     serde_json::to_string(&TokenResponse {
@@ -372,6 +384,12 @@ pub async fn auth_token_get(
                     .unwrap(),
                 )
                     .into_response();
+            } else {
+                tracing::error!(
+                    "invalid claims or scope: {:?} valid? : {:?}",
+                    claims,
+                    claims.is_valid()
+                );
             }
         }
     }
