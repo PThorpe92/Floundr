@@ -130,14 +130,12 @@ impl Code {
     /// If included, `Warning` headers MUST specify a `warn-code` of `299` and a `warn-agent` of `-`, and MUST NOT specify a `warn-date` value.
     /// A registry MUST NOT send more than 4096 bytes of warning data from all headers combined.
     /// Example warning headers:
-    /// ```
     /// Warning: 299 - "Your auth token will expire in 30 seconds."
     /// Warning: 299 - "This registry endpoint is deprecated and will be removed soon."
     /// Warning: 299 - "This image is deprecated and will be removed soon."
-    /// ```
     /// If a client receives `Warning` response headers, it SHOULD report the warnings to the user in an unobtrusive way.
     /// Clients SHOULD deduplicate warnings from multiple associated responses.
-    pub fn append_warning_header(&self, map: &mut HeaderMap) {
+    fn append_warning_header(&self, map: &mut HeaderMap) {
         map.insert(
             WARNING,
             HeaderValue::from_str(&format!("299 - {}", self.description()))

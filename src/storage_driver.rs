@@ -242,3 +242,7 @@ impl Backend {
         }
     }
 }
+
+pub fn init_testing_storage() -> Backend {
+    Backend::new(DriverType::Local, &std::path::PathBuf::from("./tests"))
+}

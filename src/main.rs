@@ -1,32 +1,12 @@
-use axum::{
-    middleware::from_fn,
-    routing::{delete, get, head, patch, post, put},
-    Extension, Router,
-};
 use clap::{Parser, Subcommand};
 use floundr::{
-    auth::{
-        auth_middleware, auth_token_get, check_scope_middleware, get_auth_clients, login_user,
-        register_user, Auth,
-    },
-    blobs::{
-        check_blob, delete_blob, get_blob, handle_upload_blob, handle_upload_session_chunk,
-        put_upload_blob, put_upload_session_blob,
-    },
-    content_discovery::{
-        create_repository, delete_repository, get_tags_list, get_v2, list_repositories,
-    },
     database::{self, initdb, migrate_fresh},
-    manifests::{delete_manifest, get_manifest, push_manifest},
+    endpoints::register_routes,
     set_env,
     storage_driver::{Backend, DriverType},
-    users::{delete_user, generate_token, get_users},
 };
-use http::Request;
 use sqlx::SqliteConnection;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
-use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
 use tracing::info;
 
 #[derive(Parser)]
@@ -139,55 +119,8 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("unable to bind to port");
+    let routes = register_routes(pool, Arc::new(storage));
 
-    let routes = Router::new()
-        .route("/auth/login", post(login_user))
-        .route("/auth/token", get(auth_token_get))
-        .route("/auth/register", post(register_user))
-        .route("/auth/clients", get(get_auth_clients))
-        .route("/repositories", get(list_repositories))
-        .route("/repositories/:name/:public", post(create_repository))
-        .route("/repositories/:name", delete(delete_repository))
-        .route("/users", get(get_users))
-        .route("/users/:email", delete(delete_user))
-        .route("/users/:email/tokens", post(generate_token))
-        .route("/v2/", get(get_v2))
-        .route("/v2/:name/blobs/:digest", put(put_upload_blob))
-        .route("/v2/:name/blobs/:digest", get(get_blob))
-        .route("/v2/:name/blobs/:digest", head(check_blob))
-        .route("/v2/:name/blobs/uploads/", post(handle_upload_blob))
-        .route(
-            "/v2/:name/blobs/uploads/:session_id",
-            put(put_upload_session_blob),
-        )
-        .route(
-            "/v2/:name/blobs/uploads/:session_id",
-            patch(handle_upload_session_chunk),
-        )
-        .route("/v2/:name/blobs/:digest", delete(delete_blob))
-        .route("/v2/:name/tags/list", get(get_tags_list))
-        .route("/v2/:name/manifests/:reference", get(get_manifest))
-        .route("/v2/:name/manifests/:reference", put(push_manifest))
-        .route("/v2/:name/manifests/:reference", delete(delete_manifest))
-        .layer(from_fn(check_scope_middleware))
-        .layer(axum::middleware::from_fn_with_state(
-            pool.clone(),
-            auth_middleware,
-        ))
-        .layer(Extension(Arc::new(storage)))
-        .layer(
-            ServiceBuilder::new().layer(TraceLayer::new_for_http().make_span_with(
-                |request: &Request<_>| {
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        uri = %request.uri(),
-                    )
-                },
-            )),
-        )
-        .layer(Extension(axum::middleware::from_extractor::<Auth>()))
-        .with_state(pool);
     axum::serve(listener, routes.into_make_service())
         .await
         .expect("unable to start server");

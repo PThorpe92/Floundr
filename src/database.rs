@@ -275,3 +275,20 @@ impl DbConn {
         }
     }
 }
+
+pub async fn init_testing_db() -> sqlx::SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect("sqlite::memory:")
+        .await
+        .expect("unable to connect to sqlite db pool");
+    let mut conn = pool.acquire().await.expect("unable to acquire connection");
+    migrate(
+        &mut conn,
+        Some("test".to_string()),
+        Some("test".to_string()),
+    )
+    .await
+    .expect("unable to migrate db");
+    pool
+}

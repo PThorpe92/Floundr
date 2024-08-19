@@ -4,3 +4,4 @@
 /logs/*.log
 /logs/report.html
 /logs/*.xml
+/tests/test
