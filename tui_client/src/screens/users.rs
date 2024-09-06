@@ -1,5 +1,5 @@
 use crate::{
-    app::{get_items, App, Mode, ACTIVE_KEYS, USERS},
+    app::{get_items, App, Mode, USERS},
     screens::InputType,
 };
 use ratatui::{
@@ -140,7 +140,7 @@ pub fn user_management_screen(frame: &mut Frame, app: &mut App) {
                         3 => format!("Is user an admin? (y/n): {}", app.input.value()),
                         _ => {
                             app.normal_mode();
-                            let _ = app.handle_input(InputType::NewUser);
+                            app.handle_input(InputType::NewUser);
                             String::from("User created")
                         }
                     },
@@ -151,7 +151,7 @@ pub fn user_management_screen(frame: &mut Frame, app: &mut App) {
                         0 => format!("Enter user email to delete: {}", app.input.value()),
                         _ => {
                             app.normal_mode();
-                            let _ = app.handle_input(InputType::DeleteUser);
+                            app.handle_input(InputType::DeleteUser);
                             String::from("User deleted")
                         }
                     },
@@ -171,7 +171,7 @@ pub fn user_management_screen(frame: &mut Frame, app: &mut App) {
                         0 => format!("Enter # key to delete: {}", app.input.value()),
                         _ => {
                             app.normal_mode();
-                            let _ = app.handle_input(InputType::DeleteUser);
+                            app.handle_input(InputType::DeleteUser);
                             String::from("Key deleted")
                         }
                     },
@@ -226,7 +226,7 @@ fn render_create_api_key(frame: &mut Frame, app: &mut App, area: ratatui::layout
             0 => format!("Enter email address of user:\n {}", app.input.value()),
             1 => {
                 app.normal_mode();
-                let _ = app.handle_input(InputType::CreateApiKey);
+                app.handle_input(InputType::CreateApiKey);
                 String::from("API key created")
             }
             _ => String::new(),

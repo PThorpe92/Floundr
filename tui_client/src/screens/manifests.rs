@@ -1,6 +1,4 @@
-use crate::app::{App, MANIFESTS};
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
     Frame,

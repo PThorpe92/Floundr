@@ -1,3 +1,12 @@
+use crate::{
+    events::AppEventHandler,
+    requests::{
+        create_new_api_key, create_new_user, create_repository, delete_repository, delete_user,
+        get_all_users, get_manifests, get_repositories, get_tokens,
+    },
+    screens::{self, InputType, ScreenType},
+    ConfigFile, Theme,
+};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use ratatui::{
@@ -12,6 +21,7 @@ use ratatui::{
 };
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
+use shared::UserResponse;
 use shared::{AuthClient, ImageManifest, RegisterUserRequest, Repo};
 use std::{
     io::{self, stdout},
@@ -19,17 +29,8 @@ use std::{
 };
 use tracing::{error, info};
 use tui_input::{backend::crossterm::EventHandler, Input};
+
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-use crate::{
-    events::AppEventHandler,
-    requests::{
-        create_new_api_key, create_new_user, create_repository, delete_repository, delete_user,
-        get_all_users, get_manifests, get_repositories, get_tokens,
-    },
-    screens::{self, InputType, ScreenType},
-    ConfigFile, Theme,
-};
-use shared::UserResponse;
 
 pub struct App {
     pub running: bool,
@@ -175,7 +176,7 @@ impl App {
         };
     }
 
-    pub fn handle_input(&mut self, kind: InputType) -> AppResult<()> {
+    pub fn handle_input(&mut self, kind: InputType) {
         self.clear_action();
         match kind {
             InputType::NewRepo => {
@@ -184,51 +185,46 @@ impl App {
                 let url = self.url.clone();
                 tokio::spawn(async move {
                     let _ = create_repository(url, name, public.to_lowercase() == "y").await;
-                })
+                });
             }
             InputType::CreateApiKey => {
                 let url = self.url.clone();
                 let name = self.buffer.pop().unwrap_or_default();
                 tokio::spawn(async move {
                     let _ = create_new_api_key(url, name).await;
-                })
+                });
             }
             InputType::DeleteUser => {
                 let user = self.buffer.pop().unwrap_or_default();
                 let url = self.url.clone();
                 tokio::spawn(async move {
                     let _ = delete_user(url, user).await;
-                })
+                });
             }
             InputType::DeleteRepo => {
                 let repo = self.buffer.pop().unwrap_or_default();
                 let url = self.url.clone();
                 tokio::spawn(async move {
                     let _ = delete_repository(url, repo).await;
-                })
+                });
             }
             InputType::NewUser => {
-                if self.buffer.len() < 4 {
-                    return Ok(());
+                match RegisterUserRequest::from_input_buff(
+                    &self.buffer.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                ) {
+                    Ok(user) => {
+                        self.buffer.clear();
+                        let url = self.url.clone();
+                        tokio::spawn(async move {
+                            let _ = create_new_user(url, user).await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("Error creating user: {:?}", e);
+                    }
                 }
-                if self.buffer[1] != self.buffer[2] {
-                    self.buffer.clear();
-                    return Ok(());
-                }
-                let user = RegisterUserRequest::new(
-                    &self.buffer[0],
-                    &self.buffer[1],
-                    &self.buffer[2],
-                    &self.buffer[3] == "y",
-                );
-                self.buffer.clear();
-                let url = self.url.clone();
-                tokio::spawn(async move {
-                    let _ = create_new_user(url, user).await;
-                })
             }
         };
-        Ok(())
     }
 
     fn cursor_up(&mut self) {

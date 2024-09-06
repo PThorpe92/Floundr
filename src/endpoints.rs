@@ -15,17 +15,57 @@ use crate::{
     users::{delete_user, generate_token, get_users},
 };
 use axum::{
-    extract::Extension,
+    extract::{Extension, Host},
+    handler::HandlerWithoutStateExt,
+    http::{StatusCode, Uri},
     middleware::from_fn,
+    response::Redirect,
     routing::{delete, get, head, patch, post, put},
-    Router,
+    BoxError, Router,
 };
 use http::Request;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
+#[derive(Clone, Copy)]
+pub struct Ports(pub u16, pub u16);
+
+#[allow(dead_code)]
+pub async fn redirect_http_to_https(ports: Ports) {
+    fn make_https(host: String, uri: axum::http::Uri, ports: Ports) -> Result<Uri, BoxError> {
+        let mut parts = uri.into_parts();
+
+        parts.scheme = Some(axum::http::uri::Scheme::HTTPS);
+
+        if parts.path_and_query.is_none() {
+            parts.path_and_query = Some("/".parse().unwrap());
+        }
+
+        let https_host = host.replace(&ports.0.to_string(), &ports.1.to_string());
+        parts.authority = Some(https_host.parse()?);
+
+        Ok(Uri::from_parts(parts)?)
+    }
+
+    let redirect = move |Host(host): Host, uri: Uri| async move {
+        match make_https(host, uri, ports) {
+            Ok(uri) => Ok(Redirect::permanent(&uri.to_string())),
+            Err(error) => {
+                tracing::warn!(%error, "failed to convert URI to HTTPS");
+                Err(StatusCode::BAD_REQUEST)
+            }
+        }
+    };
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], ports.0));
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tracing::debug!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, redirect.into_make_service())
+        .await
+        .unwrap();
+}
 #[derive(Debug)]
 pub enum Endpoint {
     GetV2,

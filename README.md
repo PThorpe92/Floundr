@@ -18,6 +18,7 @@ exist in the project in some form but are not fully implemented or tested, it is
 - **Basic Docker Push/Pull:** basic `docker push | pull` commands are supported.
 - **TUI Client:** _WIP_ Manage the registry through a terminal-based interface built with Ratatui.
 - **Storage Backend:** Local storage is currently supported (Tokio async I/O)
+- **SSL/TLS:** Serves over https with Rustls, with http redirect.
 
 ## Roadmap | TODO
 
@@ -80,8 +81,8 @@ cd tui_client && cargo run --release
 
 Run --help for all options
 
-```sh
 
+```sh
 Usage: floundr [OPTIONS] [COMMAND]
 
 Commands:
@@ -95,8 +96,12 @@ Options:
   -p, --port <PORT>                    [default: 8080]
       --storage-path <STORAGE_PATH>
       --home-dir <CONTAINER_HOME_DIR>  path to the floundr home directory (default is $XDG_DATA_HOME/floundr)
+      --ssl                            enable https
+      --cert-path <CERT_PATH>          path to the certificate file
+      --key-path <KEY_PATH>            path to the private key file
+      --https-port <HTTPS_PORT>        port to serve tls on [default: 443]
   -d, --db-path <DB_PATH>              path to the sqlite database
-      --driver <DRIVER>                [default: local] [possible values: local] (TODO: s3)
+      --driver <DRIVER>                [default: local] (TODO s3)
       --debug                          Enable debug mode
   -h, --help                           Print help
   -V, --version                        Print version
@@ -116,6 +121,14 @@ Manage users, repositories and API keys with vim keybindings.
 <img src="config/tui_client_keys.png" alt="TUI Client" width="600"/>
 
 <img src="config/tui_client_create_key.png" alt="TUI Client" width="600"/>
+
+
+
+
+## Should I use this in production?
+
+No it is not ready for any kind of production use.
+
 
 ## Contributing
 

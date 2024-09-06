@@ -65,7 +65,7 @@ pub fn repository_screen(frame: &mut Frame, app: &mut App) {
             1 => format!("Public? (y/n): {}", app.input.value()),
             _ => {
                 app.normal_mode();
-                let _ = app.handle_input(InputType::NewRepo);
+                app.handle_input(InputType::NewRepo);
                 String::from("Repo created")
             }
         }

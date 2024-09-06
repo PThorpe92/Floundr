@@ -1,6 +1,10 @@
 /target
 .env
 /config/db.sqlite3
+/config/*.pem
+/config/*.key
+/config/*.crt
+/config/*.csr
 /logs/*.log
 /logs/report.html
 /logs/*.xml

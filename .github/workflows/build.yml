@@ -22,5 +22,8 @@ jobs:
       - name: Install Deps
         run: |
           cargo install sqlx-cli --no-default-features --features sqlite && touch config/db.sqlite3 && DATABASE_URL=sqlite:./config/db.sqlite3 && sqlx migrate run
+      - name: Clippy lints
+        run: |
+          cargo clippy --all
       - name: Build
         run: cargo build --verbose

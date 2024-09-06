@@ -184,6 +184,18 @@ impl RegisterUserRequest {
             is_admin,
         }
     }
+    pub fn from_input_buff(buff: &[&str]) -> Result<Self, String> {
+        // validate input. massword and
+        if buff.len() != 4 {
+            return Err("Invalid input".to_string());
+        };
+        let req = Self::new(buff[0], buff[1], buff[2], buff[3] == "y");
+        match req.validate() {
+            true => Ok(req),
+            false => Err("Invalid input".to_string()),
+        }
+    }
+
     pub fn validate(&self) -> bool {
         self.email.is_ascii()
             && self.password.len() > 8
