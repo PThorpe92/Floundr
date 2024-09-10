@@ -20,8 +20,12 @@ services:
     network_mode: host
     volumes:
       - logs:/report
+    depends_on:
+      floundr:
+        condition: service_started
 
 volumes:
+  data:
   logs:
     driver: local
     driver_opts:

@@ -142,11 +142,11 @@ async fn main() {
         });
         let cert = match args.cert_path {
             Some(cert_path) => PathBuf::from(cert_path),
-            None => PathBuf::from("./config/floundr-key.pem"),
+            _ => PathBuf::from("./config/floundr-key.pem"),
         };
         let key = match args.key_path {
             Some(key_path) => PathBuf::from(key_path),
-            None => PathBuf::from("./config/floundr-key.pem"),
+            _ => PathBuf::from("./config/floundr-key.pem"),
         };
         let config = RustlsConfig::from_pem_file(cert, key)
             .await
